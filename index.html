@@ -781,6 +781,28 @@
     </div>
   </div>
 
+  <!-- ================= CUSTOM INTERACTIVE DIALOG MODAL (REPLACES BROWSER ALERT/PROMPT) ================= -->
+  <div id="appDialogModal" style="display: none;" onclick="closeAppDialog(null)" class="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
+    <div onclick="event.stopPropagation()" class="w-full max-w-sm bg-panel border border-subtle rounded-xl shadow-2xl p-5 space-y-4">
+      <div class="flex items-center justify-between pb-2 border-b border-subtle">
+        <h3 id="appDialogTitle" class="text-xs font-semibold text-white tracking-wide">Input</h3>
+        <button onclick="closeAppDialog(null)" class="text-[#8a8f98] hover:text-white text-xs px-1">✕</button>
+      </div>
+
+      <div class="space-y-3">
+        <p id="appDialogMessage" class="text-xs text-[#8a8f98] leading-relaxed"></p>
+        <div id="appDialogInputWrapper">
+          <input type="text" id="appDialogInput" class="w-full bg-canvas border border-subtle rounded-lg px-3 py-2 text-xs text-white placeholder-[#62666d] outline-none focus:border-brand/60 focus:ring-1 focus:ring-brand/40 transition">
+        </div>
+      </div>
+
+      <div class="flex items-center justify-end gap-2 pt-2 border-t border-subtle">
+        <button id="appDialogBtnCancel" onclick="closeAppDialog(null)" class="px-3 py-1.5 rounded-md bg-white/[0.04] hover:bg-white/[0.08] text-xs text-[#8a8f98] hover:text-white transition">Batal</button>
+        <button id="appDialogBtnConfirm" onclick="confirmAppDialog()" class="px-3.5 py-1.5 rounded-md bg-brand hover:bg-brand-hover text-xs font-medium text-white shadow-sm transition active:scale-95">Lanjut</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ================= FLOATING TOAST NOTIFICATION ================= -->
   <div id="toastNotification" class="fixed bottom-5 right-5 z-50 transform translate-y-16 opacity-0 transition-all duration-200 pointer-events-none px-4 py-2.5 rounded-lg bg-surfaceElevated border border-subtle text-xs text-white shadow-xl flex items-center gap-2">
     <span id="toastIcon">✓</span>
@@ -1062,6 +1084,80 @@
       }, 3000);
     }
 
+    // Custom Dialog Modal System (Clean replacement for window.alert / window.prompt / window.confirm)
+    let appDialogResolve = null;
+
+    function openInputDialog({ title = 'Input', message = '', defaultValue = '', placeholder = '', confirmText = 'Lanjut' }) {
+      return new Promise((resolve) => {
+        appDialogResolve = resolve;
+        document.getElementById('appDialogTitle').innerText = title;
+        const msgEl = document.getElementById('appDialogMessage');
+        if (message) {
+          msgEl.innerText = message;
+          msgEl.classList.remove('hidden');
+        } else {
+          msgEl.classList.add('hidden');
+        }
+        const inputWrapper = document.getElementById('appDialogInputWrapper');
+        inputWrapper.classList.remove('hidden');
+        const input = document.getElementById('appDialogInput');
+        input.value = defaultValue || '';
+        input.placeholder = placeholder || '';
+        const btnConfirm = document.getElementById('appDialogBtnConfirm');
+        btnConfirm.innerText = confirmText;
+        btnConfirm.className = "px-3.5 py-1.5 rounded-md bg-brand hover:bg-brand-hover text-xs font-medium text-white shadow-sm transition active:scale-95";
+
+        const modal = document.getElementById('appDialogModal');
+        modal.style.display = 'flex';
+        setTimeout(() => {
+          input.focus();
+          input.select();
+        }, 50);
+      });
+    }
+
+    function openConfirmDialog({ title = 'Konfirmasi', message = 'Apakah Anda yakin?', confirmText = 'Lanjut', danger = false }) {
+      return new Promise((resolve) => {
+        appDialogResolve = resolve;
+        document.getElementById('appDialogTitle').innerText = title;
+        const msgEl = document.getElementById('appDialogMessage');
+        msgEl.innerText = message;
+        msgEl.classList.remove('hidden');
+        const inputWrapper = document.getElementById('appDialogInputWrapper');
+        inputWrapper.classList.add('hidden');
+        const btnConfirm = document.getElementById('appDialogBtnConfirm');
+        btnConfirm.innerText = confirmText;
+        if (danger) {
+          btnConfirm.className = "px-3.5 py-1.5 rounded-md bg-rose-600 hover:bg-rose-500 text-xs font-medium text-white shadow-sm transition active:scale-95";
+        } else {
+          btnConfirm.className = "px-3.5 py-1.5 rounded-md bg-brand hover:bg-brand-hover text-xs font-medium text-white shadow-sm transition active:scale-95";
+        }
+
+        const modal = document.getElementById('appDialogModal');
+        modal.style.display = 'flex';
+        btnConfirm.focus();
+      });
+    }
+
+    function closeAppDialog(val = null) {
+      const modal = document.getElementById('appDialogModal');
+      modal.style.display = 'none';
+      if (appDialogResolve) {
+        appDialogResolve(val);
+        appDialogResolve = null;
+      }
+    }
+
+    function confirmAppDialog() {
+      const inputWrapper = document.getElementById('appDialogInputWrapper');
+      if (inputWrapper.classList.contains('hidden')) {
+        closeAppDialog(true);
+      } else {
+        const val = document.getElementById('appDialogInput').value.trim();
+        closeAppDialog(val);
+      }
+    }
+
     let isSidebarResizing = false;
 
     function initSidebarResizer() {
@@ -1266,9 +1362,24 @@
           e.preventDefault();
           enhancePrompt();
         }
+        const dlg = document.getElementById('appDialogModal');
+        if (dlg && dlg.style.display !== 'none') {
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            closeAppDialog(null);
+            return;
+          }
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            confirmAppDialog();
+            return;
+          }
+        }
         if (e.key === 'Escape') {
           closeDrawer('workspace');
           closeAgentModal();
+          closeSessionsModal();
+          closeModelModal();
         }
       });
 
@@ -1348,8 +1459,14 @@
       }
     }
 
-    function promptCustomWorkspace() {
-      const p = prompt('Masukkan absolute path direktori proyek di VPS:', currentWorkspace);
+    async function promptCustomWorkspace() {
+      const p = await openInputDialog({
+        title: 'Custom Workspace Directory',
+        message: 'Masukkan absolute path direktori proyek di VPS:',
+        defaultValue: currentWorkspace,
+        placeholder: '/home/andreadst/projects/...',
+        confirmText: 'Buka Folder'
+      });
       if (p) setWorkspace(p);
     }
 
@@ -1555,7 +1672,12 @@
 
     async function promptCreateDrawerItem(isDir) {
       const typeName = isDir ? 'Folder' : 'File';
-      const name = prompt(`Masukkan nama ${typeName} baru:`);
+      const name = await openInputDialog({
+        title: `Buat ${typeName} Baru`,
+        message: `Masukkan nama ${typeName.toLowerCase()} yang ingin dibuat:`,
+        placeholder: isDir ? 'src, components, models' : 'app.py, main.dart, config.json',
+        confirmText: `Buat ${typeName}`
+      });
       if (!name || !name.trim()) return;
 
       const cleanName = name.trim();
@@ -1588,7 +1710,12 @@
     }
 
     async function promptRenameDrawerItem(oldRelPath, oldName) {
-      const newName = prompt(`Ganti nama "${oldName}" menjadi:`, oldName);
+      const newName = await openInputDialog({
+        title: 'Ganti Nama',
+        message: `Ganti nama "${oldName}" menjadi:`,
+        defaultValue: oldName,
+        confirmText: 'Simpan Nama'
+      });
       if (!newName || !newName.trim() || newName.trim() === oldName) return;
 
       const parent = oldRelPath.includes('/') ? oldRelPath.substring(0, oldRelPath.lastIndexOf('/')) : '';
@@ -1622,8 +1749,14 @@
     }
 
     async function deleteDrawerItem(relPath, isFolder) {
-      const typeName = isFolder ? 'folder beserta isinya' : 'file';
-      if (!confirm(`Yakin ingin menghapus ${typeName} "${relPath}"?`)) return;
+      const typeName = isFolder ? 'folder beserta seluruh isinya' : 'file';
+      const ok = await openConfirmDialog({
+        title: `Hapus ${isFolder ? 'Folder' : 'File'}`,
+        message: `Yakin ingin menghapus ${typeName} "${relPath}"? Tindakan ini tidak dapat dibatalkan.`,
+        confirmText: 'Hapus Permanen',
+        danger: true
+      });
+      if (!ok) return;
 
       try {
         const res = await fetch('/api/workspace/delete-item', {
@@ -1693,7 +1826,7 @@
         container.innerHTML = `
           <div class="p-2.5 rounded-lg border border-brand/30 bg-brand/5 space-y-2">
             <div class="flex items-center gap-1.5 text-brand-light font-medium text-xs">
-              <span class="text-sm">🧠</span> Auto-Pilot Orchestrator
+              <span class="w-1.5 h-1.5 rounded-full bg-brand-light"></span> Auto-Pilot Orchestrator
             </div>
             <p class="text-[11px] text-[#8a8f98] leading-relaxed">
               AI Team Lead menganalisis tugas dan otomatis memilih tim yang tepat (mem-bypass peran tidak relevan seperti UI/UX pada security audit).
@@ -1747,19 +1880,25 @@
       renderStagesSidebar();
     }
 
-    function openAddStageModal() {
-      const name = prompt('Nama peran/spesialisasi agent (misal: Security Auditor, Database Architect):');
-      if (!name) return;
+    async function openAddStageModal() {
+      const name = await openInputDialog({
+        title: 'Tambah Peran Agent',
+        message: 'Nama peran atau spesialisasi agent:',
+        placeholder: 'Misal: Security Auditor, Database Architect, Tech Lead',
+        confirmText: 'Tambah Agent'
+      });
+      if (!name || !name.trim()) return;
+      const cleanName = name.trim();
       customStages.push({
-        role: name,
-        name: name,
-        icon: '💡',
+        role: cleanName,
+        name: cleanName,
+        icon: 'STEP',
         temperature: 0.2,
-        system: `Kamu adalah ${name}. Berikan analisis dan kontribusi terstruktur sesuai peranmu.`,
+        system: `Kamu adalah ${cleanName}. Berikan analisis dan kontribusi terstruktur sesuai peranmu.`,
         enabled: true
       });
       renderStagesSidebar();
-      showToast(`Agent ${name} ditambahkan`, '✓');
+      showToast(`Agent ${cleanName} ditambahkan`, '✓');
     }
 
     function openAgentModal(idx) {
@@ -2297,7 +2436,12 @@
       const task = await res.json();
       if (!task.final_output) return;
 
-      const fname = prompt('Simpan nama file deliverable:', `DELIVERABLE_${task.id}.md`);
+      const fname = await openInputDialog({
+        title: 'Simpan Dokumen Deliverable',
+        message: 'Tentukan nama berkas markdown untuk menyimpan deliverable:',
+        defaultValue: `DELIVERABLE_${task.id}.md`,
+        confirmText: 'Simpan Berkas'
+      });
       if (!fname) return;
 
       try {
@@ -2312,7 +2456,7 @@
         });
         if (postRes.ok) {
           const d = await postRes.json();
-          showToast(`File tersimpan di ${fname}`, '💾');
+          showToast(`File tersimpan di ${fname}`, '✓');
           await setWorkspace(currentWorkspace);
         } else {
           showToast('Gagal menyimpan file', '✕');
@@ -2324,11 +2468,17 @@
 
     async function cancelCurrentTask() {
       if (!currentTaskId) return;
-      if (!confirm('Yakin ingin membatalkan tugas yang sedang berjalan?')) return;
+      const ok = await openConfirmDialog({
+        title: 'Batalkan Tugas',
+        message: 'Yakin ingin membatalkan tugas yang sedang berjalan?',
+        confirmText: 'Ya, Batalkan',
+        danger: true
+      });
+      if (!ok) return;
       try {
         const res = await fetch(`/api/tasks/${currentTaskId}/cancel`, { method: 'POST' });
         if (res.ok) {
-          showToast('Tugas dibatalkan.', '⏹');
+          showToast('Tugas dibatalkan.', '✓');
           pollTask();
           fetchTasks();
         }
@@ -2338,7 +2488,13 @@
     }
 
     async function deleteTask(taskId) {
-      if (!confirm(`Hapus tugas [${taskId}] dari riwayat?`)) return;
+      const ok = await openConfirmDialog({
+        title: 'Hapus Tugas',
+        message: `Hapus tugas [${taskId}] dari riwayat? Data output tidak dapat dipulihkan.`,
+        confirmText: 'Hapus Riwayat',
+        danger: true
+      });
+      if (!ok) return;
       try {
         const res = await fetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
         if (res.ok) {
