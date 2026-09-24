@@ -635,33 +635,32 @@
     <!-- Drawer Body (Two Columns: Files & AGENTS.md Editor) -->
     <div class="flex-1 flex flex-col md:flex-row overflow-hidden">
       
-      <!-- Left: File list in folder (Resizable) -->
-      <div id="drawerFilesPane" style="width: 250px; min-width: 170px; max-width: 450px;" class="w-full md:w-[250px] max-h-[35vh] md:max-h-none border-b md:border-b-0 border-subtle bg-canvas/40 p-3 flex flex-col shrink-0 overflow-hidden">
-        <div class="flex items-center justify-between mb-2 pb-2 border-b border-subtle">
-          <div class="flex items-center gap-1.5 truncate">
-            <span class="text-xs font-semibold text-white uppercase tracking-wider text-[11px]">Files</span>
-            <span id="drawerFolderItemCount" class="text-[10px] text-[#8a8f98] font-mono">(0)</span>
+      <!-- Left: File Tree Explorer (Resizable) -->
+      <div id="drawerFilesPane" style="width: 260px; min-width: 180px; max-width: 480px;" class="w-full md:w-[260px] max-h-[40vh] md:max-h-none border-b md:border-b-0 border-subtle bg-canvas/40 flex flex-col shrink-0 overflow-hidden">
+
+        <!-- Header -->
+        <div class="flex items-center justify-between px-3 pt-2.5 pb-1.5 border-b border-subtle shrink-0">
+          <div class="flex items-center gap-1.5">
+            <span class="text-[11px] font-semibold text-white uppercase tracking-wider">Explorer</span>
+            <span id="drawerFolderItemCount" class="text-[10px] text-[#62666d] font-mono"></span>
           </div>
           <div class="flex items-center gap-1">
-            <button onclick="promptCreateDrawerItem(false)" title="Buat File Baru" class="px-2 py-0.5 rounded bg-white/[0.04] hover:bg-white/[0.08] text-[#d0d6e0] text-[10px] font-mono transition">
-              + File
-            </button>
-            <button onclick="promptCreateDrawerItem(true)" title="Buat Folder Baru" class="px-2 py-0.5 rounded bg-white/[0.04] hover:bg-white/[0.08] text-[#d0d6e0] text-[10px] font-mono transition">
-              + Dir
-            </button>
-            <button onclick="loadDrawerFiles(currentDrawerSubpath)" title="Refresh" class="px-1.5 py-0.5 rounded hover:bg-white/[0.08] text-[#8a8f98] hover:text-white text-[10px] font-mono transition">
-              ↻
-            </button>
+            <button onclick="promptCreateDrawerItem(false)" title="File Baru" class="px-1.5 py-0.5 rounded bg-white/[0.04] hover:bg-white/[0.08] text-[#d0d6e0] text-[10px] font-mono transition">+ File</button>
+            <button onclick="promptCreateDrawerItem(true)" title="Folder Baru" class="px-1.5 py-0.5 rounded bg-white/[0.04] hover:bg-white/[0.08] text-[#d0d6e0] text-[10px] font-mono transition">+ Dir</button>
+            <button onclick="refreshFileTree()" title="Refresh" class="px-1 py-0.5 rounded hover:bg-white/[0.08] text-[#8a8f98] hover:text-white text-[10px] font-mono transition">↻</button>
           </div>
         </div>
 
-        <!-- Breadcrumb navigation -->
-        <div id="drawerBreadcrumbBar" class="text-[10px] font-mono text-[#8a8f98] truncate mb-2 px-1.5 py-1 flex items-center gap-1 bg-surface/50 rounded border border-subtle/50">
-          <!-- Injected via JS -->
+        <!-- Search Filter -->
+        <div class="px-2.5 py-1.5 border-b border-subtle/50 shrink-0">
+          <input id="treeSearchInput" oninput="filterFileTree(this.value)" type="text"
+            placeholder="Cari file..."
+            class="w-full bg-surface/60 border border-subtle rounded px-2 py-1 text-[11px] font-mono text-[#d0d6e0] placeholder-[#62666d] outline-none focus:border-brand/50 transition" />
         </div>
 
-        <div id="drawerFilesList" class="flex-1 space-y-1 text-xs font-mono overflow-y-auto pr-1">
-          <!-- Injected via JS -->
+        <!-- Tree View -->
+        <div id="drawerFilesList" class="flex-1 overflow-y-auto overflow-x-hidden py-1.5 px-1">
+          <div class="text-[11px] text-[#8a8f98] px-2 py-3 italic">Memuat tree...</div>
         </div>
       </div>
 
@@ -1587,8 +1586,8 @@
         }
         drawer.style.transform = 'translateX(0)';
 
-        // Load files from root
-        await loadDrawerFiles(currentDrawerSubpath || '');
+        // Load file tree
+        refreshFileTree();
 
         // Load AGENTS.md if not yet loaded
         if (!document.getElementById('drawerAgentsTextarea').value && workspaceInfo) {
@@ -1804,10 +1803,8 @@
 
         if (res.ok) {
           showToast(`${typeName} ${cleanName} berhasil dibuat!`, '✓');
-          await loadDrawerFiles(currentDrawerSubpath);
-          if (!isDir) {
-            previewDrawerFile(relPath);
-          }
+          await refreshFileTree();
+          if (!isDir) { previewDrawerFile(relPath); }
         } else {
           const err = await res.json();
           showToast(err.detail || `Gagal membuat ${typeName}`, '✕');
@@ -1846,7 +1843,7 @@
             currentActiveDrawerFile = newRelPath;
             setActiveDrawerFile(newRelPath);
           }
-          await loadDrawerFiles(currentDrawerSubpath);
+          await refreshFileTree();
         } else {
           const err = await res.json();
           showToast(err.detail || 'Gagal mengubah nama', '✕');
@@ -1882,7 +1879,7 @@
             document.getElementById('drawerAgentsTextarea').value = '';
             setActiveDrawerFile('Pilih File');
           }
-          await loadDrawerFiles(currentDrawerSubpath);
+          await refreshFileTree();
         } else {
           const err = await res.json();
           showToast(err.detail || 'Gagal menghapus', '✕');
@@ -2733,7 +2730,134 @@
       }
     }
 
-    /* ================= IDE DRAWER, DIFF VIEWER & SYNTAX CHECKER ================= */
+    /* ================= FILE TREE EXPLORER ================= */
+    let fileTreeData = [];
+    let fileTreeCollapsed = new Set();
+    let fileTreeSearchQuery = '';
+    let activeTreeFile = null;
+
+    async function refreshFileTree() {
+      const container = document.getElementById('drawerFilesList');
+      if (!container) return;
+      container.innerHTML = '<div class="text-[11px] text-[#8a8f98] px-2 py-3 italic">Memuat tree...</div>';
+      try {
+        const res = await fetch(`/api/workspace/tree?path=${encodeURIComponent(currentWorkspace)}&depth=5`);
+        if (!res.ok) { container.innerHTML = '<div class="text-rose-400 px-2 py-2 text-[11px]">Gagal memuat.</div>'; return; }
+        const data = await res.json();
+        fileTreeData = data.tree || [];
+        const total = countTreeNodes(fileTreeData);
+        const countEl = document.getElementById('drawerFolderItemCount');
+        if (countEl) countEl.innerText = `(${total})`;
+        renderFileTree();
+      } catch (e) {
+        container.innerHTML = `<div class="text-rose-400 px-2 py-2 text-[11px]">${escapeHtml(e.message)}</div>`;
+      }
+    }
+
+    function countTreeNodes(nodes) {
+      let count = 0;
+      for (const n of nodes) { count++; if (n.children) count += countTreeNodes(n.children); }
+      return count;
+    }
+
+    function filterFileTree(query) {
+      fileTreeSearchQuery = query.trim().toLowerCase();
+      renderFileTree();
+    }
+
+    function renderFileTree() {
+      const container = document.getElementById('drawerFilesList');
+      if (!container) return;
+      if (!fileTreeData.length) { container.innerHTML = '<div class="text-[11px] text-[#8a8f98] px-2 py-3 italic">Folder kosong.</div>'; return; }
+      const rootName = currentWorkspace.split('/').filter(Boolean).pop() || 'root';
+      container.innerHTML = `
+        <div class="mb-0.5">
+          <div class="flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono font-semibold text-brand-light select-none">
+            <span>⊞</span><span class="truncate">${escapeHtml(rootName)}</span>
+          </div>
+          <div id="treeRoot" class="ml-2">${renderTreeNodes(fileTreeData, 0)}</div>
+        </div>`;
+    }
+
+    function matchesSearch(node, query) {
+      if (!query) return true;
+      if (node.name.toLowerCase().includes(query)) return true;
+      if (node.children) return node.children.some(c => matchesSearch(c, query));
+      return false;
+    }
+
+    function renderTreeNodes(nodes, depth) {
+      let html = '';
+      for (const node of nodes) {
+        if (!matchesSearch(node, fileTreeSearchQuery)) continue;
+        const isDir = node.is_dir;
+        const key = node.rel_path;
+        const isCollapsed = fileTreeCollapsed.has(key) && !fileTreeSearchQuery;
+        const isActive = activeTreeFile === key;
+        const indent = depth * 10;
+
+        if (isDir) {
+          const chevron = isCollapsed ? '▶' : '▼';
+          const folderIcon = isCollapsed ? '📁' : '📂';
+          html += `
+            <div class="tree-node-dir">
+              <div onclick="toggleTreeDir('${escapeHtml(key)}')"
+                class="flex items-center gap-1.5 px-1.5 py-[3px] rounded cursor-pointer hover:bg-white/[0.05] transition group select-none"
+                style="padding-left: ${indent + 6}px">
+                <span class="text-[9px] text-[#62666d] w-3 shrink-0">${chevron}</span>
+                <span class="text-[12px] shrink-0">${folderIcon}</span>
+                <span class="text-[11px] font-mono text-[#c8cdd6] group-hover:text-white truncate font-medium">${escapeHtml(node.name)}</span>
+                <div class="ml-auto flex gap-1 opacity-0 group-hover:opacity-100 shrink-0">
+                  <button onclick="event.stopPropagation(); promptRenameDrawerItem('${escapeHtml(key)}', '${escapeHtml(node.name)}')" class="text-[9px] text-[#8a8f98] hover:text-white font-mono px-1 rounded hover:bg-white/10">ren</button>
+                  <button onclick="event.stopPropagation(); deleteDrawerItem('${escapeHtml(key)}', true)" class="text-[9px] text-[#8a8f98] hover:text-rose-400 font-mono px-1 rounded hover:bg-rose-500/10">del</button>
+                </div>
+              </div>
+              <div class="tree-children" ${isCollapsed ? 'style="display:none"' : ''}>
+                ${node.children && node.children.length ? renderTreeNodes(node.children, depth + 1) : `<div style="padding-left:${indent + 22}px" class="text-[10px] text-[#62666d] py-0.5 font-mono italic">vazio</div>`}
+              </div>
+            </div>`;
+        } else {
+          const ext = node.name.split('.').pop().toLowerCase();
+          const fileIcon = {
+            'py': '🐍', 'js': '🟨', 'ts': '🔷', 'dart': '🎯', 'md': '📝',
+            'json': '{}', 'yaml': '⚙', 'yml': '⚙', 'html': '🌐', 'css': '🎨',
+            'sh': '⚡', 'txt': '📄', 'env': '🔑', 'sql': '🗄'
+          }[ext] || '📄';
+          const sizeStr = node.size > 1024 ? `${(node.size/1024).toFixed(1)}k` : `${node.size}b`;
+          html += `
+            <div onclick="openTreeFile('${escapeHtml(key)}')"
+              data-tree-path="${escapeHtml(key)}"
+              class="tree-node-file flex items-center gap-1.5 px-1.5 py-[3px] rounded cursor-pointer ${isActive ? 'bg-brand/15 text-brand-light' : 'hover:bg-white/[0.04]'} transition group select-none"
+              style="padding-left: ${indent + 16}px">
+              <span class="text-[12px] shrink-0">${fileIcon}</span>
+              <span class="text-[11px] font-mono ${isActive ? 'text-brand-light font-medium' : 'text-[#c8cdd6] group-hover:text-white'} truncate">${escapeHtml(node.name)}</span>
+              <div class="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100 shrink-0">
+                <span class="text-[9px] text-[#62666d] font-mono">${sizeStr}</span>
+                <button onclick="event.stopPropagation(); promptRenameDrawerItem('${escapeHtml(key)}', '${escapeHtml(node.name)}')" class="text-[9px] text-[#8a8f98] hover:text-white font-mono px-1 rounded hover:bg-white/10">ren</button>
+                <button onclick="event.stopPropagation(); deleteDrawerItem('${escapeHtml(key)}', false)" class="text-[9px] text-[#8a8f98] hover:text-rose-400 font-mono px-1 rounded hover:bg-rose-500/10">del</button>
+              </div>
+            </div>`;
+        }
+      }
+      return html;
+    }
+
+    function toggleTreeDir(relPath) {
+      if (fileTreeCollapsed.has(relPath)) {
+        fileTreeCollapsed.delete(relPath);
+      } else {
+        fileTreeCollapsed.add(relPath);
+      }
+      renderFileTree();
+    }
+
+    async function openTreeFile(relPath) {
+      activeTreeFile = relPath;
+      renderFileTree();
+      await previewDrawerFile(relPath);
+      appendMiniTerminal(`> Membuka: ${relPath}`);
+    }
+
     function updateGutterLines() {
       const ta = document.getElementById('drawerAgentsTextarea');
       const gutter = document.getElementById('drawerLineGutter');

@@ -1385,7 +1385,7 @@ async def get_workspace_files(path: str, subpath: str = ""):
     target_dir = sanitize_path(path)
     clean_sub = subpath.strip().strip("/")
     cur_dir = sanitize_path(os.path.join(target_dir, clean_sub), base_dir=target_dir) if clean_sub else target_dir
-    
+
     if not os.path.exists(cur_dir) or not os.path.isdir(cur_dir):
         raise HTTPException(status_code=404, detail="Direktori tidak ditemukan.")
 
@@ -1402,7 +1402,7 @@ async def get_workspace_files(path: str, subpath: str = ""):
                 "is_dir": is_dir,
                 "size": size
             })
-            
+
         parent_sub = os.path.dirname(clean_sub) if clean_sub else None
         if parent_sub == "" and clean_sub:
             parent_sub = ""
@@ -1415,6 +1415,35 @@ async def get_workspace_files(path: str, subpath: str = ""):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+def _build_tree(base_dir: str, rel_dir: str, depth: int, max_depth: int, ignored: set) -> List[Dict[str, Any]]:
+    if depth > max_depth:
+        return []
+    cur = os.path.join(base_dir, rel_dir) if rel_dir else base_dir
+    try:
+        entries = sorted(os.scandir(cur), key=lambda e: (not e.is_dir(), e.name.lower()))
+    except PermissionError:
+        return []
+    result = []
+    for e in entries:
+        if e.name.startswith(".") or e.name in ignored:
+            continue
+        rel = os.path.relpath(e.path, base_dir)
+        if e.is_dir():
+            children = _build_tree(base_dir, rel, depth + 1, max_depth, ignored)
+            result.append({"name": e.name, "rel_path": rel, "is_dir": True, "children": children})
+        else:
+            result.append({"name": e.name, "rel_path": rel, "is_dir": False, "size": e.stat().st_size, "children": []})
+    return result
+
+@app.get("/api/workspace/tree")
+async def get_workspace_tree(path: str, depth: int = 4):
+    target_dir = sanitize_path(path)
+    if not os.path.exists(target_dir) or not os.path.isdir(target_dir):
+        raise HTTPException(status_code=404, detail="Direktori tidak ditemukan.")
+    ignored = {"__pycache__", "node_modules", ".git", ".snapshots", "venv", ".venv", ".hermes", "dist", "build"}
+    tree = _build_tree(target_dir, "", 0, min(depth, 6), ignored)
+    return {"root": target_dir, "tree": tree}
 
 @app.get("/api/workspace/file-content")
 async def get_file_content(path: str, filename: str):
