@@ -374,7 +374,10 @@
       <div class="p-3.5 border-t border-subtle bg-[#0b0c0d]">
         <div class="flex items-center justify-between text-[11px] font-medium uppercase tracking-wider text-[#8a8f98] mb-2">
           <span>Recent Work</span>
-          <button onclick="fetchTasks()" class="text-[#8a8f98] hover:text-white text-[10px]">↻</button>
+          <div class="flex items-center gap-1.5">
+            <button id="btnToggleSessionFilter" onclick="toggleTaskSessionFilter()" class="px-1.5 py-0.5 rounded text-[9px] font-mono bg-white/[0.04] text-slate-300 hover:text-white" title="Filter sesi ini vs semua sesi">Sesi Ini</button>
+            <button onclick="fetchTasks()" class="text-[#8a8f98] hover:text-white text-[10px]">↻</button>
+          </div>
         </div>
         <div id="historyTaskSidebarList" class="space-y-1 max-h-[120px] overflow-y-auto pr-0.5">
           <div class="text-xs text-[#8a8f98] py-2 text-center">Loading history...</div>
@@ -678,9 +681,10 @@
             <p id="drawerEditorSublabel" class="text-[10px] text-[#8a8f98] truncate">Instruksi arsitektur ini otomatis disuntikkan ke setiap agent sebelum tugas diproses.</p>
           </div>
           <div class="flex items-center gap-2 shrink-0">
-            <!-- Mode switch: Code vs Diff -->
+            <!-- Mode switch: Code vs Color vs Diff -->
             <div class="flex items-center rounded bg-white/[0.04] p-0.5 border border-subtle text-[11px]">
-              <button id="btnDrawerModeCode" onclick="setDrawerEditorMode('code')" class="px-2 py-0.5 rounded bg-brand text-white font-medium transition">Code</button>
+              <button id="btnDrawerModeCode" onclick="setDrawerEditorMode('code')" class="px-2 py-0.5 rounded bg-brand text-white font-medium transition">Edit</button>
+              <button id="btnDrawerModeHighlight" onclick="setDrawerEditorMode('highlight')" class="px-2 py-0.5 rounded text-[#8a8f98] hover:text-white transition">Color</button>
               <button id="btnDrawerModeDiff" onclick="setDrawerEditorMode('diff')" class="px-2 py-0.5 rounded text-[#8a8f98] hover:text-white transition">Diff (+/-)</button>
             </div>
             <button id="btnDrawerCheckSyntax" onclick="checkActiveDrawerSyntax()" title="Uji sintaks kompilasi file aktif" class="px-2 py-1 rounded bg-white/[0.04] hover:bg-white/[0.08] text-[#8a8f98] hover:text-white text-[11px] transition">
@@ -705,6 +709,8 @@
 2
 3</div>
             <textarea id="drawerAgentsTextarea" onscroll="syncGutterScroll()" oninput="updateGutterLines()" class="flex-1 bg-transparent p-3 text-xs font-mono text-[#d0d6e0] placeholder-[#62666d] outline-none resize-none leading-relaxed overflow-auto" placeholder="# Project Rules & Architecture&#10;&#10;Contoh:&#10;- Stack: Flutter + Laravel API.&#10;- Modular structure.&#10;- Seluruh method wajib ada type safety."></textarea>
+            <!-- Highlighted Code Container -->
+            <pre id="drawerHighlightContainer" style="display: none;" class="flex-1 p-3 text-xs font-mono overflow-auto bg-[#070809] m-0"><code id="drawerHighlightCode" class="language-text"></code></pre>
             <!-- Diff Container -->
             <div id="drawerDiffContainer" style="display: none;" class="flex-1 p-3 text-xs font-mono overflow-auto space-y-0.5 bg-[#070809]">
               <!-- Diff lines populated dynamically -->
@@ -2438,10 +2444,16 @@
                 <button onclick="copyFileContent(${idx})" class="text-[#8a8f98] hover:text-white text-[11px] transition">Salin Kode</button>
               </div>
             </div>
-            <pre class="p-3 text-[11px] font-mono text-[#d0d6e0] overflow-x-auto bg-[#0a0b0c] max-h-64"><code>${escapeHtml(f.content)}</code></pre>
+            <pre class="p-3 text-[11px] font-mono text-[#d0d6e0] overflow-x-auto bg-[#0a0b0c] max-h-64"><code class="language-${escapeHtml(f.language || 'text')}">${escapeHtml(f.content)}</code></pre>
           </div>
         `;
       }).join('');
+
+      if (window.Prism) {
+        setTimeout(() => {
+          try { Prism.highlightAllUnder(container); } catch (e) {}
+        }, 10);
+      }
     }
 
     function escapeHtml(string) {
@@ -2660,6 +2672,15 @@
       }
     }
 
+    let taskSessionFilter = 'active';
+
+    function toggleTaskSessionFilter() {
+      taskSessionFilter = taskSessionFilter === 'active' ? 'all' : 'active';
+      const btn = document.getElementById('btnToggleSessionFilter');
+      if (btn) btn.innerText = taskSessionFilter === 'active' ? 'Sesi Ini' : 'Semua';
+      fetchTasks();
+    }
+
     async function fetchTasks() {
       try {
         const res = await fetch('/api/tasks');
@@ -2670,7 +2691,22 @@
           return;
         }
 
-        container.innerHTML = tasks.map(t => {
+        let displayedTasks = tasks;
+        if (taskSessionFilter === 'active' && activeWorkstationSessionId) {
+          displayedTasks = tasks.filter(t => (t.session_id || 'default') === activeWorkstationSessionId);
+        }
+
+        if (!displayedTasks.length) {
+          container.innerHTML = `
+            <div class="text-[11px] text-[#8a8f98] py-3 text-center space-y-1">
+              <div>Tidak ada tugas di sesi ini.</div>
+              <button onclick="toggleTaskSessionFilter()" class="text-brand-light hover:underline text-[10px]">Tampilkan Semua</button>
+            </div>
+          `;
+          return;
+        }
+
+        container.innerHTML = displayedTasks.map(t => {
           let badgeColor = 'text-[#8a8f98]';
           if (t.status === 'running') badgeColor = 'text-amber-400 font-bold';
           if (t.status === 'waiting_approval') badgeColor = 'text-amber-300 font-bold animate-pulse';
@@ -2722,23 +2758,57 @@
     async function setDrawerEditorMode(mode) {
       currentDrawerEditorMode = mode;
       const btnCode = document.getElementById('btnDrawerModeCode');
+      const btnColor = document.getElementById('btnDrawerModeHighlight');
       const btnDiff = document.getElementById('btnDrawerModeDiff');
       const ta = document.getElementById('drawerAgentsTextarea');
       const gutter = document.getElementById('drawerLineGutter');
+      const highlightBox = document.getElementById('drawerHighlightContainer');
+      const highlightCode = document.getElementById('drawerHighlightCode');
       const diffBox = document.getElementById('drawerDiffContainer');
+
+      // Reset button styles
+      if (btnCode) btnCode.className = 'px-2 py-0.5 rounded text-[#8a8f98] hover:text-white transition';
+      if (btnColor) btnColor.className = 'px-2 py-0.5 rounded text-[#8a8f98] hover:text-white transition';
+      if (btnDiff) btnDiff.className = 'px-2 py-0.5 rounded text-[#8a8f98] hover:text-white transition';
 
       if (mode === 'diff') {
         if (btnDiff) btnDiff.className = 'px-2 py-0.5 rounded bg-brand text-white font-medium transition';
-        if (btnCode) btnCode.className = 'px-2 py-0.5 rounded text-[#8a8f98] hover:text-white transition';
         if (ta) ta.style.display = 'none';
         if (gutter) gutter.style.display = 'none';
+        if (highlightBox) highlightBox.style.display = 'none';
         if (diffBox) diffBox.style.display = 'block';
         await renderDrawerDiff();
+      } else if (mode === 'highlight') {
+        if (btnColor) btnColor.className = 'px-2 py-0.5 rounded bg-brand text-white font-medium transition';
+        if (ta) ta.style.display = 'none';
+        if (gutter) gutter.style.display = 'none';
+        if (diffBox) diffBox.style.display = 'none';
+        if (highlightBox && highlightCode && ta) {
+          const fname = currentActiveDrawerFile || 'AGENTS.md';
+          const ext = fname.split('.').pop().toLowerCase();
+          const langMap = {
+            'py': 'python',
+            'dart': 'dart',
+            'js': 'javascript',
+            'mjs': 'javascript',
+            'json': 'json',
+            'html': 'markup',
+            'css': 'css',
+            'md': 'markdown'
+          };
+          const lang = langMap[ext] || 'text';
+          highlightCode.className = `language-${lang}`;
+          highlightCode.textContent = ta.value;
+          highlightBox.style.display = 'block';
+          if (window.Prism) {
+            Prism.highlightElement(highlightCode);
+          }
+        }
       } else {
         if (btnCode) btnCode.className = 'px-2 py-0.5 rounded bg-brand text-white font-medium transition';
-        if (btnDiff) btnDiff.className = 'px-2 py-0.5 rounded text-[#8a8f98] hover:text-white transition';
         if (ta) ta.style.display = 'block';
         if (gutter) gutter.style.display = 'block';
+        if (highlightBox) highlightBox.style.display = 'none';
         if (diffBox) diffBox.style.display = 'none';
       }
     }
@@ -2814,6 +2884,14 @@
       updateGutterLines();
       setDrawerEditorMode('diff');
       appendMiniTerminal(`> Previewing diff for extracted file: ${file.path}`);
+    }
+
+    function insertApprovalChip(text) {
+      const el = document.getElementById('approvalFeedbackInput');
+      if (el) {
+        el.value = (el.value ? el.value.trim() + ' ' : '') + text;
+        el.focus();
+      }
     }
 
     async function checkActiveDrawerSyntax() {
@@ -3007,6 +3085,7 @@
       if (s) {
         showToast(`Beralih ke sesi: ${s.title}`, '✓');
         newDraftTask();
+        fetchTasks();
       }
     }
 

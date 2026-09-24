@@ -5,4 +5,5 @@ sessions.json
 DELIVERABLE_*.md
 .snapshots/
 *.bak
+*.production
 .DS_Store

@@ -1,5 +1,6 @@
 import asyncio
 import difflib
+import fnmatch
 import json
 import os
 import py_compile
@@ -754,14 +755,46 @@ def extract_code_files(text: str, scope_matrix: Optional[Dict[str, Any]] = None)
         if fpath:
             is_blocked = False
             blocked_reason = None
-            fpath_low = fpath.lower().strip()
+            fpath_norm = os.path.normpath(fpath.lower().strip())
+            fname_only = os.path.basename(fpath_norm)
 
-            if any(fb == fpath_low or fpath_low.endswith(fb) or fb in fpath_low for fb in forbidden_list):
-                is_blocked = True
-                blocked_reason = "File dilarang diubah oleh Scope Matrix (forbidden_files)"
-            elif allowed_list and not any(al == fpath_low or fpath_low.endswith(al) or al in fpath_low or al == "*" or al == "*.*" for al in allowed_list):
-                is_blocked = True
-                blocked_reason = "File di luar whitelist izin Scope Matrix (allowed_files)"
+            # Check forbidden list with path and glob support
+            for fb in forbidden_list:
+                fb_norm = os.path.normpath(fb)
+                fb_base = os.path.basename(fb_norm)
+                if (fb_norm == fpath_norm or 
+                    fpath_norm.endswith(fb_norm) or 
+                    fnmatch.fnmatch(fpath_norm, fb_norm) or 
+                    fnmatch.fnmatch(fname_only, fb_norm) or 
+                    (fb_base == fname_only and fb_base)):
+                    is_blocked = True
+                    blocked_reason = "File dilarang diubah oleh Scope Matrix (forbidden_files)"
+                    break
+
+            # Check allowed list with path and glob support
+            if not is_blocked and allowed_list:
+                allowed_match = False
+                for al in allowed_list:
+                    al_norm = os.path.normpath(al)
+                    if al_norm in ("*", "*.*", "."):
+                        allowed_match = True
+                        break
+                    if (al_norm == fpath_norm or 
+                        fpath_norm.endswith(al_norm) or 
+                        fnmatch.fnmatch(fpath_norm, al_norm) or 
+                        fnmatch.fnmatch(fname_only, al_norm)):
+                        allowed_match = True
+                        break
+                    if al_norm.endswith("/*") and fpath_norm.startswith(al_norm[:-2] + "/"):
+                        allowed_match = True
+                        break
+                    al_base = os.path.basename(al_norm)
+                    if al_base and "*" not in al_norm and al_base == fname_only:
+                        allowed_match = True
+                        break
+                if not allowed_match:
+                    is_blocked = True
+                    blocked_reason = "File di luar whitelist izin Scope Matrix (allowed_files)"
 
             # Match paling akhir menimpa match sebelumnya (hasil revisi auto-fix menang)
             files_map[fpath] = {
@@ -1103,6 +1136,37 @@ async def execute_pipeline(task_id: str):
                                 stg["status"] = "bypassed"
                                 stg["output"] = f"STATUS: OUT_OF_SCOPE\nDilewati otomatis oleh Orchestrator (peran tidak terpilih)."
                                 stg["completed_at"] = time.time()
+
+                    # In auto mode, also append bypassed roles as visual timeline stubs
+                    existing_roles = [s["role"].lower() for s in task["stages"]] + [s["role"].lower() for s in dynamic_stages]
+                    for bp_name in scope_matrix.get("bypassed_roles", []):
+                        bp_clean = bp_name.strip()
+                        if not bp_clean:
+                            continue
+                        matched_key = None
+                        for k in SPECIALIST_CATALOG.keys():
+                            if k.lower() == bp_clean.lower() or bp_clean.lower() in k.lower():
+                                matched_key = k
+                                break
+                        spec = SPECIALIST_CATALOG.get(matched_key, {
+                            "role": bp_clean,
+                            "name": bp_clean,
+                            "icon": "⊘",
+                            "system": f"Peran {bp_clean}"
+                        })
+                        if spec["role"].lower() not in existing_roles:
+                            task["stages"].append({
+                                "role": spec["role"],
+                                "name": spec["name"],
+                                "icon": spec.get("icon", "⊘"),
+                                "system": spec.get("system", ""),
+                                "temperature": 0.1,
+                                "status": "bypassed",
+                                "output": f"STATUS: OUT_OF_SCOPE\nDilewati otomatis oleh Orchestrator pada Tahap 0 (di luar target scope: '{scope_matrix.get('target_scope', '')}').",
+                                "completed_at": time.time(),
+                                "error": None
+                            })
+                            existing_roles.append(spec["role"].lower())
 
                 if dynamic_stages:
                     for ds in dynamic_stages:
@@ -1787,32 +1851,87 @@ async def check_syntax(req: CheckSyntaxRequest):
                 "language": "yaml",
                 "message": f"YAMLError: {str(e)[:150]}"
             }
-    else:
-        # Check matching brackets for JS/TS/Dart/HTML
-        stack = []
-        pairs = {')': '(', '}': '{', ']': '['}
-        line_no = 1
-        for idx_ch, ch in enumerate(content):
-            if ch == '\n':
-                line_no += 1
-            elif ch in "({[":
-                stack.append((ch, line_no))
-            elif ch in ")}]":
-                if not stack or stack[-1][0] != pairs[ch]:
+    elif ext in [".js", ".mjs", ".cjs"]:
+        # Use real node -c verification
+        node_bin = shutil.which("node")
+        if node_bin:
+            try:
+                proc = subprocess.run(
+                    [node_bin, "--input-type=module", "-c"],
+                    input=content,
+                    text=True,
+                    capture_output=True,
+                    timeout=5
+                )
+                if proc.returncode == 0:
+                    return {
+                        "valid": True,
+                        "language": "javascript",
+                        "message": "Sintaks JavaScript valid (lolos verifikasi node -c)."
+                    }
+                else:
+                    err_lines = [l.strip() for l in proc.stderr.splitlines() if l.strip() and not l.strip().startswith("at ")]
+                    err_msg = err_lines[-1] if err_lines else "Syntax error"
+                    line_no = None
+                    m_line = re.search(r'\[stdin\]:(\d+)', proc.stderr)
+                    if m_line:
+                        line_no = int(m_line.group(1))
                     return {
                         "valid": False,
-                        "language": ext.lstrip(".") or "code",
+                        "language": "javascript",
                         "line": line_no,
-                        "message": f"Mismatched bracket '{ch}' di baris {line_no}."
+                        "message": f"Node SyntaxError{f' di baris {line_no}' if line_no else ''}: {err_msg}"
+                    }
+            except Exception as e:
+                pass
+
+        # Fallback bracket checker with string/comment stripping
+        clean_content = re.sub(r'(\/\*[\s\S]*?\*\/|\/\/[^\n]*|\"[^\"\\]*(?:\\.[^\"\\]*)*\"|\'[^\'\\]*(?:\\.[^\'\\]*)*\'|`[^`\\]*(?:\\.[^`\\]*)*`)', '', content)
+        stack = []
+        pairs = {')': '(', '}': '{', ']': '['}
+        for idx_ch, ch in enumerate(clean_content):
+            if ch in "({[":
+                stack.append(ch)
+            elif ch in ")}]":
+                if not stack or stack[-1] != pairs[ch]:
+                    return {
+                        "valid": False,
+                        "language": "javascript",
+                        "message": f"Mismatched bracket '{ch}'."
                     }
                 stack.pop()
         if stack:
-            unclosed, uline = stack[-1]
+            return {
+                "valid": False,
+                "language": "javascript",
+                "message": f"Unclosed bracket '{stack[-1]}'."
+            }
+        return {
+            "valid": True,
+            "language": "javascript",
+            "message": "Struktur kurung dan blok seimbang."
+        }
+    else:
+        # Check matching brackets for Dart/HTML/other with string literal stripping
+        clean_content = re.sub(r'(\/\*[\s\S]*?\*\/|\/\/[^\n]*|\"[^\"\\]*(?:\\.[^\"\\]*)*\"|\'[^\'\\]*(?:\\.[^\'\\]*)*\'|`[^`\\]*(?:\\.[^`\\]*)*`)', '', content)
+        stack = []
+        pairs = {')': '(', '}': '{', ']': '['}
+        for idx_ch, ch in enumerate(clean_content):
+            if ch in "({[":
+                stack.append(ch)
+            elif ch in ")}]":
+                if not stack or stack[-1] != pairs[ch]:
+                    return {
+                        "valid": False,
+                        "language": ext.lstrip(".") or "code",
+                        "message": f"Mismatched bracket '{ch}'."
+                    }
+                stack.pop()
+        if stack:
             return {
                 "valid": False,
                 "language": ext.lstrip(".") or "code",
-                "line": uline,
-                "message": f"Unclosed bracket '{unclosed}' di baris {uline}."
+                "message": f"Unclosed bracket '{stack[-1]}'."
             }
         return {
             "valid": True,
