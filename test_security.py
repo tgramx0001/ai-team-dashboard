@@ -92,6 +92,32 @@ print("not allowed")
         self.assertEqual(res_invalid.status_code, 200)
         self.assertFalse(res_invalid.json()["valid"])
 
+    def test_extract_code_files_nested_backticks(self):
+        text_with_nested = """
+### FILE: README.md
+```markdown
+# Documentation
+Example usage:
+```python
+x = 10
+print(x)
+```
+End of section.
+```
+
+### FILE: script.py
+```python
+print("done")
+```
+"""
+        files = extract_code_files(text_with_nested)
+        f_map = {f["path"]: f for f in files}
+        self.assertIn("README.md", f_map)
+        self.assertIn("script.py", f_map)
+        self.assertIn("print(x)", f_map["README.md"]["content"])
+        self.assertIn("End of section.", f_map["README.md"]["content"])
+        self.assertEqual(f_map["script.py"]["content"].strip(), 'print("done")')
+
     def test_workspace_diff(self):
         res = client.post("/api/workspace/diff", json={
             "path": "/home/andreadst/projects/ai-team-dashboard",

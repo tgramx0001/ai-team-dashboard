@@ -708,7 +708,7 @@
             <div id="drawerLineGutter" class="w-10 bg-surface/80 border-r border-subtle py-3 text-right pr-2 select-none text-[11px] font-mono text-[#62666d] overflow-hidden whitespace-pre">1
 2
 3</div>
-            <textarea id="drawerAgentsTextarea" onscroll="syncGutterScroll()" oninput="updateGutterLines()" class="flex-1 bg-transparent p-3 text-xs font-mono text-[#d0d6e0] placeholder-[#62666d] outline-none resize-none leading-relaxed overflow-auto" placeholder="# Project Rules & Architecture&#10;&#10;Contoh:&#10;- Stack: Flutter + Laravel API.&#10;- Modular structure.&#10;- Seluruh method wajib ada type safety."></textarea>
+            <textarea id="drawerAgentsTextarea" wrap="off" onscroll="syncGutterScroll()" oninput="updateGutterLines()" class="flex-1 bg-transparent p-3 text-xs font-mono text-[#d0d6e0] placeholder-[#62666d] outline-none resize-none leading-relaxed overflow-auto whitespace-pre" placeholder="# Project Rules & Architecture&#10;&#10;Contoh:&#10;- Stack: Flutter + Laravel API.&#10;- Modular structure.&#10;- Seluruh method wajib ada type safety."></textarea>
             <!-- Highlighted Code Container -->
             <pre id="drawerHighlightContainer" style="display: none;" class="flex-1 p-3 text-xs font-mono overflow-auto bg-[#070809] m-0"><code id="drawerHighlightCode" class="language-text"></code></pre>
             <!-- Diff Container -->
@@ -1479,6 +1479,7 @@
           closeAgentModal();
           closeSessionsModal();
           closeModelModal();
+          closeWorkstationSessionsModal();
         }
       });
 

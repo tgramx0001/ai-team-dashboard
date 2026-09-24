@@ -632,10 +632,15 @@ def load_tasks():
             print(f"Error loading tasks: {e}")
             tasks_store = {}
 
+def _atomic_write_json(file_path: str, data: Any):
+    tmp_path = f"{file_path}.{uuid.uuid4().hex}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    os.replace(tmp_path, file_path)
+
 def save_tasks():
     try:
-        with open(TASKS_FILE, "w", encoding="utf-8") as f:
-            json.dump(tasks_store, f, indent=2, ensure_ascii=False)
+        _atomic_write_json(TASKS_FILE, tasks_store)
     except Exception as e:
         print(f"Error saving tasks: {e}")
 
@@ -665,24 +670,26 @@ def load_workstation_sessions():
 
 def save_workstation_sessions():
     try:
-        with open(WORKSTATION_SESSIONS_FILE, "w", encoding="utf-8") as f:
-            json.dump(workstation_sessions_store, f, indent=2, ensure_ascii=False)
+        _atomic_write_json(WORKSTATION_SESSIONS_FILE, workstation_sessions_store)
     except Exception as e:
         print(f"Error saving sessions: {e}")
 
 load_workstation_sessions()
 
-def save_apply_snapshot(wdir: str, task_id: str, records: List[Dict[str, Any]]):
+def save_apply_snapshot(wdir: str, task_id: str, records: List[Dict[str, Any]], session_id: Optional[str] = None):
     try:
-        snap_file = os.path.join(SNAPSHOTS_DIR, "last_apply.json")
         data = {
             "timestamp": time.time(),
             "working_directory": wdir,
             "task_id": task_id,
+            "session_id": session_id or "default",
             "records": records
         }
-        with open(snap_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        # Save both global latest and session-scoped snapshot to avoid cross-session overwrites
+        _atomic_write_json(os.path.join(SNAPSHOTS_DIR, "last_apply.json"), data)
+        if session_id:
+            safe_sid = re.sub(r'[^a-zA-Z0-9_\-]', '_', session_id)
+            _atomic_write_json(os.path.join(SNAPSHOTS_DIR, f"last_apply_{safe_sid}.json"), data)
     except Exception as e:
         print(f"Error saving snapshot: {e}")
 
@@ -738,8 +745,8 @@ def generate_repo_map(target_dir: str, max_files: int = 35) -> str:
     return "\n".join(lines)
 
 def extract_code_files(text: str, scope_matrix: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-    pattern = r'(?:###\s*FILE:|(?:\*\*|#)?FILE:(?:\*\*)?)\s*[`"]?([a-zA-Z0-9_\-\.\/\\]+)[`"]?\s*\n+```([a-zA-Z0-9_\-]+)?\n([\s\S]*?)```'
-    matches = re.findall(pattern, text)
+    file_header_re = re.compile(r'(?:###\s*FILE:|(?:\*\*|#)?FILE:(?:\*\*)?)\s*[`"]?([a-zA-Z0-9_\-\.\/\\]+)[`"]?', re.IGNORECASE)
+    matches = list(file_header_re.finditer(text))
     files_map: Dict[str, Dict[str, Any]] = {}
 
     forbidden_list = []
@@ -748,10 +755,26 @@ def extract_code_files(text: str, scope_matrix: Optional[Dict[str, Any]] = None)
         forbidden_list = [f.lower().strip() for f in scope_matrix.get("forbidden_files", []) if f.strip()]
         allowed_list = [f.lower().strip() for f in scope_matrix.get("allowed_files", []) if f.strip()]
 
-    for m in matches:
-        fpath = m[0].strip().replace('\\', '/').strip('/')
-        lang = m[1].strip() or "text"
-        code = m[2]
+    for i, m in enumerate(matches):
+        raw_fpath = m.group(1)
+        fpath = raw_fpath.strip().replace('\\', '/').strip('/')
+        start_pos = m.end()
+        end_pos = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        chunk = text[start_pos:end_pos]
+
+        fence_start_m = re.search(r"^\s*```([a-zA-Z0-9_\-]+)?\s*\n", chunk, re.MULTILINE)
+        if fence_start_m:
+            lang = (fence_start_m.group(1) or "text").strip()
+            code_start = fence_start_m.end()
+            fence_end_matches = list(re.finditer(r"\n```\s*$", chunk, re.MULTILINE))
+            if fence_end_matches:
+                last_fence = fence_end_matches[-1]
+                code = chunk[code_start:last_fence.start()]
+            else:
+                code = chunk[code_start:]
+        else:
+            lang = "text"
+            code = chunk.strip()
         if fpath:
             is_blocked = False
             blocked_reason = None
@@ -1137,41 +1160,42 @@ async def execute_pipeline(task_id: str):
                                 stg["output"] = f"STATUS: OUT_OF_SCOPE\nDilewati otomatis oleh Orchestrator (peran tidak terpilih)."
                                 stg["completed_at"] = time.time()
 
-                    # In auto mode, also append bypassed roles as visual timeline stubs
-                    existing_roles = [s["role"].lower() for s in task["stages"]] + [s["role"].lower() for s in dynamic_stages]
-                    for bp_name in scope_matrix.get("bypassed_roles", []):
-                        bp_clean = bp_name.strip()
-                        if not bp_clean:
-                            continue
-                        matched_key = None
-                        for k in SPECIALIST_CATALOG.keys():
-                            if k.lower() == bp_clean.lower() or bp_clean.lower() in k.lower():
-                                matched_key = k
-                                break
-                        spec = SPECIALIST_CATALOG.get(matched_key, {
-                            "role": bp_clean,
-                            "name": bp_clean,
-                            "icon": "⊘",
-                            "system": f"Peran {bp_clean}"
-                        })
-                        if spec["role"].lower() not in existing_roles:
-                            task["stages"].append({
-                                "role": spec["role"],
-                                "name": spec["name"],
-                                "icon": spec.get("icon", "⊘"),
-                                "system": spec.get("system", ""),
-                                "temperature": 0.1,
-                                "status": "bypassed",
-                                "output": f"STATUS: OUT_OF_SCOPE\nDilewati otomatis oleh Orchestrator pada Tahap 0 (di luar target scope: '{scope_matrix.get('target_scope', '')}').",
-                                "completed_at": time.time(),
-                                "error": None
-                            })
-                            existing_roles.append(spec["role"].lower())
-
                 if dynamic_stages:
                     for ds in dynamic_stages:
                         task["stages"].append(ds)
-                    save_tasks()
+
+                # In auto mode, append bypassed roles as visual timeline stubs at the end of pipeline
+                existing_roles = [s["role"].lower() for s in task["stages"]]
+                for bp_name in scope_matrix.get("bypassed_roles", []):
+                    bp_clean = bp_name.strip()
+                    if not bp_clean:
+                        continue
+                    matched_key = None
+                    for k in SPECIALIST_CATALOG.keys():
+                        if k.lower() == bp_clean.lower() or bp_clean.lower() in k.lower():
+                            matched_key = k
+                            break
+                    spec = SPECIALIST_CATALOG.get(matched_key, {
+                        "role": bp_clean,
+                        "name": bp_clean,
+                        "icon": "⊘",
+                        "system": f"Peran {bp_clean}"
+                    })
+                    if spec["role"].lower() not in existing_roles:
+                        task["stages"].append({
+                            "role": spec["role"],
+                            "name": spec["name"],
+                            "icon": spec.get("icon", "⊘"),
+                            "system": spec.get("system", ""),
+                            "temperature": 0.1,
+                            "status": "bypassed",
+                            "output": f"STATUS: OUT_OF_SCOPE\nDilewati otomatis oleh Orchestrator pada Tahap 0 (di luar target scope: '{scope_matrix.get('target_scope', '')}').",
+                            "completed_at": time.time(),
+                            "error": None
+                        })
+                        existing_roles.append(spec["role"].lower())
+
+                save_tasks()
 
             # --- HUMAN APPROVAL GATE ---
             # If enabled and current stage is Orchestrator, Architect or Planner, pause for human steering
@@ -1244,8 +1268,14 @@ async def execute_pipeline(task_id: str):
         task["completed_at"] = time.time()
         task["final_output"] = context_chain
 
-        # Extract multi-file blocks with Scope Matrix validation
-        extracted = extract_code_files(context_chain, scope_matrix=task.get("scope_matrix"))
+        # Extract multi-file blocks prioritizing Coder/Fixer outputs to avoid QA comments polluting code
+        code_producing_roles = {"coder", "auto-fixer", "developer", "lead developer"}
+        coder_outputs = [
+            s.get("output", "") for s in task.get("stages", [])
+            if s.get("status") == "completed" and any(r in s.get("role", "").lower() or r in s.get("name", "").lower() for r in code_producing_roles)
+        ]
+        text_for_extraction = "\n\n".join(coder_outputs) if coder_outputs else context_chain
+        extracted = extract_code_files(text_for_extraction, scope_matrix=task.get("scope_matrix"))
         task["extracted_files"] = extracted
 
         # Auto-write files if requested and working directory is set (with Scope Matrix enforcement & Snapshot)
@@ -1279,7 +1309,7 @@ async def execute_pipeline(task_id: str):
             task["applied_files"] = written_files
             task["blocked_files"] = blocked_files
             if snapshot_records:
-                save_apply_snapshot(wdir, task_id, snapshot_records)
+                save_apply_snapshot(wdir, task_id, snapshot_records, session_id=task.get("session_id"))
 
         # Auto-save deliverable document if enabled
         if task.get("auto_save_artifact") and wdir:
@@ -1723,7 +1753,7 @@ async def apply_task_files(task_id: str):
     task["applied_files"] = [a["path"] for a in applied]
     task["blocked_files"] = blocked
     if snapshot_records:
-        save_apply_snapshot(wdir, task_id, snapshot_records)
+        save_apply_snapshot(wdir, task_id, snapshot_records, session_id=task.get("session_id"))
     save_tasks()
     return {
         "status": "ok",
@@ -1852,8 +1882,12 @@ async def check_syntax(req: CheckSyntaxRequest):
                 "message": f"YAMLError: {str(e)[:150]}"
             }
     elif ext in [".js", ".mjs", ".cjs"]:
-        # Use real node -c verification
+        # Use real node -c verification with fallback to known NVM node paths
         node_bin = shutil.which("node")
+        if not node_bin:
+            nvm_candidate = "/home/andreadst/.nvm/versions/node/v24.20.0/bin/node"
+            if os.path.exists(nvm_candidate):
+                node_bin = nvm_candidate
         if node_bin:
             try:
                 proc = subprocess.run(
@@ -1941,10 +1975,19 @@ async def check_syntax(req: CheckSyntaxRequest):
 
 class RollbackRequest(BaseModel):
     path: Optional[str] = None
+    session_id: Optional[str] = None
 
 @app.post("/api/workspace/rollback")
 async def rollback_last_apply(req: RollbackRequest):
-    snap_file = os.path.join(SNAPSHOTS_DIR, "last_apply.json")
+    snap_file = None
+    if req.session_id:
+        safe_sid = re.sub(r'[^a-zA-Z0-9_\-]', '_', req.session_id)
+        candidate = os.path.join(SNAPSHOTS_DIR, f"last_apply_{safe_sid}.json")
+        if os.path.exists(candidate):
+            snap_file = candidate
+    if not snap_file:
+        snap_file = os.path.join(SNAPSHOTS_DIR, "last_apply.json")
+
     if not os.path.exists(snap_file):
         raise HTTPException(status_code=400, detail="Tidak ada snapshot perubahan terakhir untuk di-rollback.")
     try:
