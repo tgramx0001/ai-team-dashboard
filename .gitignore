@@ -7,3 +7,5 @@ DELIVERABLE_*.md
 *.bak
 *.production
 .DS_Store
+.env
+.model_override

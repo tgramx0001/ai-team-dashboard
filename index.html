@@ -6,6 +6,7 @@
   <title>AI Team Workstation - Autonomous Multi-Agent OS</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.7/dist/purify.min.js"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
@@ -181,9 +182,9 @@
     <div class="hidden lg:flex items-center gap-2 px-2.5 py-1 rounded-full bg-white/[0.02] border border-subtle text-[11px] font-mono text-[#8a8f98]">
       <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
       <span class="text-[#d0d6e0]" id="navStatusModel">9Router (bai)</span>
-      <span class="text-[#62666d]">·</span>
-      <span>100.104.131.60</span>
-      <span class="text-[#62666d]">·</span>
+      <span class="text-[#62666d]" id="navStatusSepHost">·</span>
+      <span id="navStatusHost"></span>
+      <span class="text-[#62666d]" id="navStatusSepHost2">·</span>
       <span id="navTaskCount" class="text-brand-light">0 Active</span>
     </div>
 
@@ -243,23 +244,8 @@
             <span>Working Directory</span>
             <button onclick="openDrawer('workspace')" class="text-brand-light hover:underline lowercase text-[11px]">manage</button>
           </div>
-          <div class="grid grid-cols-2 gap-1.5">
-            <button onclick="setWorkspace('/home/andreadst/projects/ai-team-dashboard')" class="ws-btn p-2 rounded-md border border-subtle bg-white/[0.02] hover:bg-white/[0.05] text-left transition flex items-center gap-2">
-              <span class="w-1.5 h-1.5 rounded-full bg-brand shrink-0"></span>
-              <span class="text-xs text-[#d0d6e0] truncate">ai-team-hub</span>
-            </button>
-            <button onclick="setWorkspace('/home/andreadst/projects/mobile-programming-2')" class="ws-btn p-2 rounded-md border border-subtle bg-white/[0.02] hover:bg-white/[0.05] text-left transition flex items-center gap-2">
-              <span class="w-1.5 h-1.5 rounded-full bg-[#8a8f98] shrink-0"></span>
-              <span class="text-xs text-[#d0d6e0] truncate">mobile-prog-2</span>
-            </button>
-            <button onclick="setWorkspace('/home/andreadst/projects/sql-mystery')" class="ws-btn p-2 rounded-md border border-subtle bg-white/[0.02] hover:bg-white/[0.05] text-left transition flex items-center gap-2">
-              <span class="w-1.5 h-1.5 rounded-full bg-[#8a8f98] shrink-0"></span>
-              <span class="text-xs text-[#d0d6e0] truncate">sql-mystery</span>
-            </button>
-            <button onclick="setWorkspace('/home/andreadst/Documents/Obsidian Vault/Kuliah')" class="ws-btn p-2 rounded-md border border-subtle bg-white/[0.02] hover:bg-white/[0.05] text-left transition flex items-center gap-2">
-              <span class="w-1.5 h-1.5 rounded-full bg-[#8a8f98] shrink-0"></span>
-              <span class="text-xs text-[#d0d6e0] truncate">Kuliah Vault</span>
-            </button>
+          <div id="wsPresetsList" class="grid grid-cols-2 gap-1.5">
+            <!-- diisi dari GET /api/workspace/presets -->
           </div>
           <button onclick="promptCustomWorkspace()" class="w-full mt-1.5 p-1.5 rounded-md border border-dashed border-subtle bg-white/[0.01] hover:bg-white/[0.04] text-center transition flex items-center justify-center gap-1.5 text-xs text-[#8a8f98] hover:text-white">
             <span>+ Custom Path Direktori...</span>
@@ -620,7 +606,7 @@
         <svg class="w-4 h-4 text-[#8a8f98] shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
         <div class="truncate">
           <h3 class="text-xs font-semibold text-white uppercase tracking-wider">Project Explorer & AGENTS.md</h3>
-          <p class="text-[11px] font-mono text-[#8a8f98] truncate max-w-xs sm:max-w-md" id="drawerPathLabel">/home/andreadst/...</p>
+          <p class="text-[11px] font-mono text-[#8a8f98] truncate max-w-xs sm:max-w-md" id="drawerPathLabel">...</p>
         </div>
       </div>
       <div class="flex items-center gap-1.5 shrink-0">
@@ -861,6 +847,11 @@
             <span class="text-[10px] font-normal text-emerald-400 bg-emerald-400/10 px-2 py-0.5 rounded-full border border-emerald-400/20">Active</span>
           </div>
           <div id="modalProviderLabel" class="text-[10px] text-[#62666d] font-mono">Provider: custom (http://127.0.0.1:20128/v1)</div>
+          <div id="modalModelScopeLabel" class="text-[10px] text-[#62666d] font-mono"></div>
+          <label class="flex items-start gap-2 pt-1 cursor-pointer">
+            <input type="checkbox" id="modelGlobalToggle" class="mt-0.5 accent-[#5e6ad2]">
+            <span class="text-[10px] text-[#8a8f98] leading-snug">Terapkan global ke <span class="font-mono">~/.hermes/config.yaml</span>. Tanpa centang, model hanya berlaku untuk dashboard ini (file override lokal).</span>
+          </label>
         </div>
 
         <div>
@@ -910,10 +901,54 @@
   <!-- ================= LOGIC & RUNTIME ================= -->
   <script>
     // State Store
+    // ---- AUTH: attach bearer token (localStorage) to every /api call ----
+    const AI_TEAM_AUTH_KEY = 'ai_team_auth_token';
+    let authPromptActive = false;
+    let authPromptDisabled = false;
+    const _nativeFetch = window.fetch.bind(window);
+    window.fetch = function (input, init) {
+      const url = typeof input === 'string' ? input : (input && input.url) || '';
+      const isApi = url.startsWith('/api/') || url.startsWith(location.origin + '/api/');
+      if (!isApi) return _nativeFetch(input, init);
+      init = init || {};
+      const headers = new Headers(init.headers || undefined);
+      const token = localStorage.getItem(AI_TEAM_AUTH_KEY);
+      if (token && !headers.has('Authorization')) headers.set('Authorization', 'Bearer ' + token);
+      init.headers = headers;
+      return _nativeFetch(input, init).then(res => {
+        if (res.status === 401 && !authPromptActive && !authPromptDisabled) {
+          authPromptActive = true;
+          // non-blocking: jangan menahan response polling saat dialog terbuka
+          openInputDialog({
+            title: 'API Auth Token',
+            message: 'Server meminta token autentikasi. Masukkan AI_TEAM_AUTH_TOKEN:',
+            placeholder: 'token',
+            confirmText: 'Simpan'
+          }).then(t => {
+            authPromptActive = false;
+            if (t && t.trim()) {
+              localStorage.setItem(AI_TEAM_AUTH_KEY, t.trim());
+              showToast('Token tersimpan. Ulangi aksi terakhir.', '🔑');
+            } else {
+              authPromptDisabled = true; // jangan spam prompt di sesi halaman ini
+            }
+          }).catch(() => { authPromptActive = false; authPromptDisabled = true; });
+        }
+        return res;
+      });
+    };
+
+    // ---- XSS: LLM output is untrusted; never inject raw markdown HTML ----
+    function mdRender(src) {
+      const html = marked.parse(src == null ? '' : String(src));
+      if (window.DOMPurify) return DOMPurify.sanitize(html);
+      return String(html).replace(/</g, '&lt;'); // CDN gagal → fail closed
+    }
+
     let presets = {};
     let activePreset = 'auto';
     let customStages = [];
-    let currentWorkspace = '/home/andreadst/projects/mobile-programming-2';
+    let currentWorkspace = ''; // diisi dari GET /api/workspace/presets (lihat loadWorkspacePresets)
     let workspaceInfo = null;
     let currentTaskId = null;
     let pollingInterval = null;
@@ -995,6 +1030,11 @@
         if (modalActiveEl) modalActiveEl.innerText = activeModelName;
         const modalProvEl = document.getElementById('modalProviderLabel');
         if (modalProvEl) modalProvEl.innerText = `Provider: ${data.provider} (${data.base_url})`;
+        const scopeEl = document.getElementById('modalModelScopeLabel');
+        if (scopeEl) {
+          const scopeText = { env: 'LLM_MODEL (env)', dashboard: 'override dashboard', hermes: 'config Hermes (global)', default: 'default' }[data.scope] || data.scope;
+          scopeEl.innerText = `Sumber model: ${scopeText}${data.hermes_default ? ' · hermes: ' + data.hermes_default : ''}`;
+        }
         
         renderModelsList(availableModels);
       } catch (e) {
@@ -1034,16 +1074,23 @@
         return;
       }
       try {
+        const applyGlobally = document.getElementById('modelGlobalToggle')?.checked === true;
         const res = await fetch('/api/hermes/model', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ model: modelName })
+          body: JSON.stringify({ model: modelName, apply_globally: applyGlobally })
         });
         if (!res.ok) throw new Error('Gagal mengganti model');
+        const data = await res.json().catch(() => ({}));
         activeModelName = modelName;
         document.getElementById('navModelName').innerText = activeModelName;
         document.getElementById('modalActiveModelLabel').innerText = activeModelName;
-        showToast(`Model Hermes diganti ke: ${modelName}`, '🤖');
+        showToast(
+          applyGlobally
+            ? `Model global Hermes diganti ke: ${modelName}`
+            : `Model dashboard diganti ke: ${modelName} (config Hermes tidak diubah)`,
+          '🤖'
+        );
         renderModelsList(availableModels);
         closeModelModal();
       } catch (e) {
@@ -1491,7 +1538,8 @@
         await fetchWorkstationSessions();
         await loadHermesSkills();
         await loadHermesModel();
-        await setWorkspace(currentWorkspace);
+        await loadWorkspacePresets();
+        if (currentWorkspace) await setWorkspace(currentWorkspace);
         await fetchTasks();
         await updateSystemStatus();
         setInterval(updateSystemStatus, 15000);
@@ -1507,7 +1555,50 @@
         const d = await res.json();
         const countEl = document.getElementById('navTaskCount');
         if (countEl) countEl.innerText = `${d.running_count} Running`;
+        const hostEl = document.getElementById('navStatusHost');
+        const host = d.public_host || '';
+        if (hostEl) hostEl.innerText = host;
+        const sep1 = document.getElementById('navStatusSepHost');
+        const sep2 = document.getElementById('navStatusSepHost2');
+        const vis = host ? '' : 'none';
+        if (sep1) sep1.style.display = vis;
+        if (hostEl) hostEl.style.display = vis;
+        if (sep2) sep2.style.display = vis;
       } catch (e) {}
+    }
+
+    // Workspace quick-switcher: paths come from config (env/.env), never from source.
+    const AI_TEAM_WORKSPACE_KEY = 'ai_team_workspace';
+    async function loadWorkspacePresets() {
+      const saved = localStorage.getItem(AI_TEAM_WORKSPACE_KEY);
+      if (saved) currentWorkspace = saved;
+      try {
+        const res = await fetch('/api/workspace/presets');
+        if (!res.ok) return;
+        const d = await res.json();
+        renderWorkspacePresets(d.presets || []);
+        if (!currentWorkspace) currentWorkspace = d.default || ((d.presets || [])[0] || {}).path || '';
+      } catch (e) {
+        console.error('Failed to load workspace presets:', e);
+      }
+    }
+
+    function renderWorkspacePresets(list) {
+      const el = document.getElementById('wsPresetsList');
+      if (!el) return;
+      el.innerHTML = '';
+      (list || []).forEach((p, i) => {
+        const btn = document.createElement('button');
+        btn.className = 'ws-btn p-2 rounded-md border border-subtle bg-white/[0.02] hover:bg-white/[0.05] text-left transition flex items-center gap-2';
+        btn.onclick = () => setWorkspace(p.path);
+        const dot = document.createElement('span');
+        dot.className = `w-1.5 h-1.5 rounded-full shrink-0 ${i === 0 ? 'bg-brand' : 'bg-[#8a8f98]'}`;
+        const label = document.createElement('span');
+        label.className = 'text-xs text-[#d0d6e0] truncate';
+        label.textContent = p.label || p.path;
+        btn.append(dot, label);
+        el.appendChild(btn);
+      });
     }
 
     async function setWorkspace(path) {
@@ -1516,6 +1607,7 @@
         toggleSidebar(false);
       }
       currentWorkspace = path.trim();
+      try { localStorage.setItem(AI_TEAM_WORKSPACE_KEY, currentWorkspace); } catch (e) {}
       const folderName = currentWorkspace.split('/').pop() || currentWorkspace;
       
       document.getElementById('navWorkspaceName').innerText = folderName;
@@ -1564,7 +1656,7 @@
         title: 'Custom Workspace Directory',
         message: 'Masukkan absolute path direktori proyek di VPS:',
         defaultValue: currentWorkspace,
-        placeholder: '/home/andreadst/projects/...',
+        placeholder: '/absolute/path/to/project',
         confirmText: 'Buka Folder'
       });
       if (p) setWorkspace(p);
@@ -1623,12 +1715,13 @@
       const shortName = relPath.split('/').pop() || relPath;
       saveBtnLabel.innerText = `Simpan (${shortName})`;
 
+      // elemen opsional: boleh tidak ada di DOM (drawer mode tertentu)
       if (isAgentsMd || relPath.toLowerCase() === 'agents.md') {
         sublabel.innerText = 'Instruksi arsitektur ini otomatis disuntikkan ke setiap agent.';
-        fileIcon.innerText = '⭐';
+        if (fileIcon) fileIcon.innerText = '⭐';
       } else {
         sublabel.innerText = `Menyunting file di VPS (${relPath}).`;
-        fileIcon.innerText = '📄';
+        if (fileIcon) fileIcon.innerText = '📄';
       }
       highlightActiveDrawerFile();
     }
@@ -1670,7 +1763,7 @@
           const isLast = (i === parts.length - 1);
           bcrumbHtml += `<span class="text-[#62666d]">/</span><span onclick="loadDrawerFiles('${accum}')" class="cursor-pointer hover:text-white ${isLast ? 'text-white font-semibold' : 'text-[#8a8f98]'}">${parts[i]}</span>`;
         }
-        bcrumbEl.innerHTML = bcrumbHtml;
+        if (bcrumbEl) bcrumbEl.innerHTML = bcrumbHtml;
 
         let html = '';
 
@@ -2319,7 +2412,7 @@
       // Deliverable Rendered View
       const renderEl = document.getElementById('deliverableRenderedBody');
       if (task.final_output) {
-        renderEl.innerHTML = marked.parse(task.final_output);
+        renderEl.innerHTML = mdRender(task.final_output);
       } else if (task.status === 'failed') {
         renderEl.innerHTML = `
           <div class="py-10 px-4 text-center space-y-3 max-w-md mx-auto">
@@ -2374,7 +2467,7 @@
             </div>
           `;
         } else if (s.output) {
-          contentHtml = marked.parse(s.output);
+          contentHtml = mdRender(s.output);
         } else {
           contentHtml = `<span class="italic text-[#8a8f98] font-mono">${s.status === 'running' ? 'Mengetik jawaban...' : 'Menunggu antrean...'}</span>`;
         }
@@ -2736,9 +2829,16 @@
     let fileTreeSearchQuery = '';
     let activeTreeFile = null;
 
+    let lastTreeWorkspace = null;
+
     async function refreshFileTree() {
       const container = document.getElementById('drawerFilesList');
       if (!container) return;
+      if (lastTreeWorkspace !== currentWorkspace) {
+        fileTreeCollapsed.clear();
+        activeTreeFile = null;
+        lastTreeWorkspace = currentWorkspace;
+      }
       container.innerHTML = '<div class="text-[11px] text-[#8a8f98] px-2 py-3 italic">Memuat tree...</div>';
       try {
         const res = await fetch(`/api/workspace/tree?path=${encodeURIComponent(currentWorkspace)}&depth=5`);
@@ -2813,7 +2913,7 @@
                 </div>
               </div>
               <div class="tree-children" ${isCollapsed ? 'style="display:none"' : ''}>
-                ${node.children && node.children.length ? renderTreeNodes(node.children, depth + 1) : `<div style="padding-left:${indent + 22}px" class="text-[10px] text-[#62666d] py-0.5 font-mono italic">vazio</div>`}
+                ${node.children && node.children.length ? renderTreeNodes(node.children, depth + 1) : (node.truncated ? `<div style="padding-left:${indent + 22}px" class="text-[10px] text-[#62666d] py-0.5 font-mono">⋯ (kedalaman maks)</div>` : `<div style="padding-left:${indent + 22}px" class="text-[10px] text-[#62666d] py-0.5 font-mono italic">kosong</div>`)}
               </div>
             </div>`;
         } else {

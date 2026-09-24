@@ -1,6 +1,8 @@
 import asyncio
 import difflib
 import fnmatch
+import glob
+import hmac
 import json
 import os
 import py_compile
@@ -22,7 +24,51 @@ from pydantic import BaseModel
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TASKS_FILE = os.path.join(BASE_DIR, "tasks.json")
-ALLOWED_ROOT = os.environ.get("WORKSPACE_ROOT", os.path.expanduser("~"))
+
+def _load_env_file(path: str) -> None:
+    """Read simple KEY=VALUE lines from a local .env. Real env vars always win."""
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                key, val = key.strip(), val.strip().strip('"').strip("'")
+                if key:
+                    os.environ.setdefault(key, val)
+    except Exception:
+        pass
+
+_load_env_file(os.path.join(BASE_DIR, ".env"))
+
+def _split_paths(raw: str) -> List[str]:
+    """Parse a path list from env (comma/semicolon separated), expand ~ and $VARS."""
+    out: List[str] = []
+    for part in raw.replace(";", ",").split(","):
+        part = part.strip()
+        if part:
+            out.append(os.path.abspath(os.path.expandvars(os.path.expanduser(part))))
+    return out
+
+def _env_paths(key: str, default: str) -> List[str]:
+    raw = os.environ[key] if key in os.environ else default
+    return _split_paths(raw)
+
+# Workspace boundary: primary root plus explicit extra roots (never the whole $HOME).
+ALLOWED_ROOT = os.path.abspath(os.path.expandvars(os.path.expanduser(
+    os.environ.get("WORKSPACE_ROOT", os.path.expanduser("~/projects"))
+)))
+EXTRA_ROOTS = _env_paths("WORKSPACE_EXTRA_ROOTS", os.path.expanduser("~/Documents"))
+ALLOWED_ROOTS = [ALLOWED_ROOT] + [r for r in EXTRA_ROOTS if r != ALLOWED_ROOT]
+DEFAULT_WORKSPACE = os.environ.get("DEFAULT_WORKSPACE", ALLOWED_ROOT)
+AUTH_TOKEN = os.environ.get("AI_TEAM_AUTH_TOKEN", "").strip()
+LAN_HOST = os.environ.get("LAN_HOST", "")
+ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()] or [
+    "http://localhost:8090", "http://127.0.0.1:8090"
+]
 
 # Hermes Integration Constants
 HERMES_DIR = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
@@ -34,28 +80,72 @@ HERMES_CONFIG_FILE = os.path.join(HERMES_DIR, "config.yaml")
 app = FastAPI(title="AI Team Dashboard - Autonomous Workstation")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def require_auth(request: Request, call_next):
+    """Bearer token on every /api/* route. Fail closed when no token is configured:
+    API stays reachable from loopback only, never from the network."""
+    if request.url.path.startswith("/api"):
+        if AUTH_TOKEN:
+            header = request.headers.get("authorization", "")
+            expected = f"Bearer {AUTH_TOKEN}"
+            if not hmac.compare_digest(header.encode(), expected.encode()):
+                return JSONResponse(status_code=401, content={"detail": "Unauthorized: token tidak valid."})
+        else:
+            host = (request.client.host if request.client else "") or ""
+            if host not in ("127.0.0.1", "::1", "testclient"):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "AI_TEAM_AUTH_TOKEN belum diatur; API hanya bisa diakses dari localhost."},
+                )
+    return await call_next(request)
+
+
 # In-memory approval events
 APPROVAL_EVENTS: Dict[str, asyncio.Event] = {}
 
-def get_llm_config() -> Tuple[str, str, str]:
-    # Check Hermes config first if model not overridden by environment
-    hermes_model = None
+# Dashboard-scoped model override: keeps model switching local to this app so
+# changing it from the UI does not touch ~/.hermes/config.yaml.
+MODEL_OVERRIDE_FILE = os.path.join(BASE_DIR, ".model_override")
+
+def _read_hermes_model() -> Optional[str]:
     if os.path.exists(HERMES_CONFIG_FILE):
         try:
             with open(HERMES_CONFIG_FILE, "r", encoding="utf-8") as f:
                 hcfg = yaml.safe_load(f) or {}
-                hermes_model = hcfg.get("model", {}).get("default")
+                return hcfg.get("model", {}).get("default") or None
         except Exception:
-            pass
+            return None
+    return None
+
+def _read_model_override() -> Optional[str]:
+    try:
+        if os.path.exists(MODEL_OVERRIDE_FILE):
+            with open(MODEL_OVERRIDE_FILE, "r", encoding="utf-8") as f:
+                val = f.read().strip()
+                return val or None
+    except Exception:
+        return None
+    return None
+
+def _write_model_override(model_name: str) -> None:
+    tmp = f"{MODEL_OVERRIDE_FILE}.{uuid.uuid4().hex}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(model_name.strip())
+    os.replace(tmp, MODEL_OVERRIDE_FILE)
+
+def get_llm_config() -> Tuple[str, str, str]:
+    # Precedence: LLM_MODEL env > dashboard override > Hermes config > "bai"
+    hermes_model = _read_hermes_model()
 
     base_url = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:20128/v1").rstrip("/")
-    model = os.environ.get("LLM_MODEL") or hermes_model or "bai"
+    model = os.environ.get("LLM_MODEL") or _read_model_override() or hermes_model or "bai"
     key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
 
     # Auto-detect local 9Router sqlite if key not passed in env
@@ -197,20 +287,31 @@ def get_session_messages(session_id: str, limit: int = 100) -> List[Dict[str, An
         return []
 
 def get_hermes_model_info() -> Dict[str, Any]:
-    active_model = "bai"
+    """Effective model (what this dashboard actually calls) + where it comes from."""
     provider = "custom"
     base_url = "http://127.0.0.1:20128/v1"
+    hermes_default = _read_hermes_model()
 
     if os.path.exists(HERMES_CONFIG_FILE):
         try:
             with open(HERMES_CONFIG_FILE, "r", encoding="utf-8") as f:
                 cfg = yaml.safe_load(f) or {}
             m = cfg.get("model", {})
-            active_model = m.get("default", active_model)
             provider = m.get("provider", provider)
             base_url = m.get("base_url", base_url)
         except Exception:
             pass
+
+    _, active_model, _ = get_llm_config()
+    override = _read_model_override()
+    if os.environ.get("LLM_MODEL"):
+        scope = "env"
+    elif override:
+        scope = "dashboard"
+    elif hermes_default:
+        scope = "hermes"
+    else:
+        scope = "default"
 
     available = []
     try:
@@ -230,23 +331,48 @@ def get_hermes_model_info() -> Dict[str, Any]:
         "active_model": active_model,
         "provider": provider,
         "base_url": base_url,
+        "scope": scope,
+        "hermes_default": hermes_default,
+        "dashboard_override": override,
+        "env_override": os.environ.get("LLM_MODEL") or None,
         "available_models": list(dict.fromkeys(available))
     }
 
-def update_hermes_model(model_name: str) -> bool:
-    if not os.path.exists(HERMES_CONFIG_FILE):
-        return False
+def update_hermes_model(model_name: str, apply_globally: bool = False) -> Optional[str]:
+    """Switch the model used by this dashboard.
+
+    Default is dashboard-scoped (a local override file, no side effects on
+    ~/.hermes/config.yaml). apply_globally=True is the explicit, intentional
+    path that rewrites the Hermes config; returns the applied scope or None.
+    """
+    name = (model_name or "").strip()
+    if not name:
+        return None
+    if apply_globally:
+        if not os.path.exists(HERMES_CONFIG_FILE):
+            return None
+        try:
+            with open(HERMES_CONFIG_FILE, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+            if "model" not in cfg:
+                cfg["model"] = {}
+            cfg["model"]["default"] = name
+            with open(HERMES_CONFIG_FILE, "w", encoding="utf-8") as f:
+                yaml.dump(cfg, f, default_flow_style=False)
+            # drop the local override so the global choice takes effect
+            try:
+                if os.path.exists(MODEL_OVERRIDE_FILE):
+                    os.remove(MODEL_OVERRIDE_FILE)
+            except OSError:
+                pass
+            return "hermes"
+        except Exception:
+            return None
     try:
-        with open(HERMES_CONFIG_FILE, "r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-        if "model" not in cfg:
-            cfg["model"] = {}
-        cfg["model"]["default"] = model_name
-        with open(HERMES_CONFIG_FILE, "w", encoding="utf-8") as f:
-            yaml.dump(cfg, f, default_flow_style=False)
-        return True
+        _write_model_override(name)
+        return "dashboard"
     except Exception:
-        return False
+        return None
 
 SPECIALIST_CATALOG: Dict[str, Dict[str, Any]] = {
     "Architect": {
@@ -663,7 +789,7 @@ def load_workstation_sessions():
             "created_at": time.time(),
             "updated_at": time.time(),
             "pinned": True,
-            "working_directory": "/home/andreadst/projects/ai-team-dashboard",
+            "working_directory": DEFAULT_WORKSPACE,
             "task_ids": []
         }
         save_workstation_sessions()
@@ -694,16 +820,24 @@ def save_apply_snapshot(wdir: str, task_id: str, records: List[Dict[str, Any]], 
         print(f"Error saving snapshot: {e}")
 
 def sanitize_path(path: str, base_dir: Optional[str] = None) -> str:
-    path = os.path.abspath(path.strip())
-    root = os.path.abspath(base_dir) if base_dir else os.path.abspath(ALLOWED_ROOT)
+    """Resolve `path` (symlinks included) and require it to stay inside the boundary.
+
+    Returns the fully resolved absolute path so callers never write through an
+    in-root symlink that points outside the workspace. With no base_dir the path
+    must stay inside any configured workspace root (primary or extra).
+    """
+    if "\x00" in path:
+        raise HTTPException(status_code=400, detail="Akses direktori di luar batas diizinkan.")
     try:
-        resolved_path = Path(path).resolve()
-        resolved_root = Path(root).resolve()
-        if not (resolved_path == resolved_root or resolved_path.is_relative_to(resolved_root)):
+        resolved_path = Path(os.path.abspath(path.strip())).resolve()
+        roots = [Path(os.path.abspath(base_dir)).resolve()] if base_dir else [Path(r).resolve() for r in ALLOWED_ROOTS]
+        if not any(resolved_path == r or resolved_path.is_relative_to(r) for r in roots):
             raise HTTPException(status_code=400, detail="Akses direktori di luar batas diizinkan.")
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=400, detail="Akses direktori di luar batas diizinkan.")
-    return path
+    return str(resolved_path)
 
 def generate_repo_map(target_dir: str, max_files: int = 35) -> str:
     if not os.path.exists(target_dir) or not os.path.isdir(target_dir):
@@ -872,6 +1006,8 @@ class TaskCreateRequest(BaseModel):
 
 class ModelUpdateRequest(BaseModel):
     model: str
+    # False = dashboard-scoped override (default, no ~/.hermes/config.yaml write)
+    apply_globally: Optional[bool] = False
 
 class TaskApproveRequest(BaseModel):
     action: str = "approve"  # "approve" or "reject"
@@ -1333,9 +1469,34 @@ async def execute_pipeline(task_id: str):
 async def get_presets():
     return list(PRESETS.values())
 
+def get_workspace_presets() -> List[Dict[str, str]]:
+    """Quick-switch workspaces from WORKSPACE_PRESETS env ('path|Label;path|Label').
+
+    Machine-specific paths live in .env (gitignored) or the service unit, never
+    in source.
+    """
+    raw = os.environ.get("WORKSPACE_PRESETS", "")
+    presets: List[Dict[str, str]] = []
+    for chunk in raw.split(";"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        path, _, label = chunk.partition("|")
+        path = os.path.abspath(os.path.expandvars(os.path.expanduser(path.strip())))
+        if not path:
+            continue
+        presets.append({"path": path, "label": (label.strip() or os.path.basename(path.rstrip("/")) or path)})
+    if not presets:
+        presets.append({"path": DEFAULT_WORKSPACE, "label": os.path.basename(DEFAULT_WORKSPACE.rstrip("/")) or "workspace"})
+    return presets
+
+@app.get("/api/workspace/presets")
+async def api_workspace_presets():
+    return {"default": DEFAULT_WORKSPACE, "presets": get_workspace_presets(), "roots": ALLOWED_ROOTS}
+
 @app.get("/api/workspace/info")
 async def get_workspace_info(path: Optional[str] = None):
-    target = sanitize_path(path or "/home/andreadst/projects")
+    target = sanitize_path(path or DEFAULT_WORKSPACE)
     if not os.path.exists(target):
         return {"exists": False, "path": target, "files": [], "agents_md": "", "agents_md_file": None, "git": {"is_git": False}}
 
@@ -1428,10 +1589,14 @@ def _build_tree(base_dir: str, rel_dir: str, depth: int, max_depth: int, ignored
     for e in entries:
         if e.name.startswith(".") or e.name in ignored:
             continue
+        # skip symlinks — prevents traversal outside base_dir via symlink escape
+        if e.is_symlink():
+            continue
         rel = os.path.relpath(e.path, base_dir)
-        if e.is_dir():
-            children = _build_tree(base_dir, rel, depth + 1, max_depth, ignored)
-            result.append({"name": e.name, "rel_path": rel, "is_dir": True, "children": children})
+        if e.is_dir(follow_symlinks=False):
+            truncated = depth + 1 > max_depth
+            children = [] if truncated else _build_tree(base_dir, rel, depth + 1, max_depth, ignored)
+            result.append({"name": e.name, "rel_path": rel, "is_dir": True, "children": children, "truncated": truncated})
         else:
             result.append({"name": e.name, "rel_path": rel, "is_dir": False, "size": e.stat().st_size, "children": []})
     return result
@@ -1551,7 +1716,11 @@ async def save_workspace_artifact(req: WorkspaceSaveArtifactRequest):
     if not os.path.exists(target_dir) or not os.path.isdir(target_dir):
         raise HTTPException(status_code=400, detail="Direktori tidak valid.")
     fname = req.filename or f"DELIVERABLE_{int(time.time())}.md"
-    file_path = os.path.join(target_dir, fname)
+    # Artifact name must be a plain file name: strip any directory part and re-check the boundary.
+    fname = os.path.basename(fname.replace("\\", "/").strip())
+    if not fname or fname in (".", ".."):
+        raise HTTPException(status_code=400, detail="Nama artifact tidak valid.")
+    file_path = sanitize_path(os.path.join(target_dir, fname), base_dir=target_dir)
     try:
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(req.content)
@@ -1912,11 +2081,12 @@ async def check_syntax(req: CheckSyntaxRequest):
             }
     elif ext in [".js", ".mjs", ".cjs"]:
         # Use real node -c verification with fallback to known NVM node paths
-        node_bin = shutil.which("node")
+        node_bin = os.environ.get("NODE_BIN") or shutil.which("node")
         if not node_bin:
-            nvm_candidate = "/home/andreadst/.nvm/versions/node/v24.20.0/bin/node"
-            if os.path.exists(nvm_candidate):
-                node_bin = nvm_candidate
+            # newest installed nvm node, no machine-specific version pinned
+            candidates = sorted(glob.glob(os.path.expanduser("~/.nvm/versions/node/*/bin/node")))
+            if candidates:
+                node_bin = candidates[-1]
         if node_bin:
             try:
                 proc = subprocess.run(
@@ -2073,7 +2243,7 @@ def create_workstation_session(req: SessionCreateRequest):
         "created_at": time.time(),
         "updated_at": time.time(),
         "pinned": False,
-        "working_directory": req.working_directory or "/home/andreadst/projects/ai-team-dashboard",
+        "working_directory": req.working_directory or DEFAULT_WORKSPACE,
         "task_ids": []
     }
     workstation_sessions_store[s_id] = session_data
@@ -2162,10 +2332,10 @@ def api_hermes_model():
 
 @app.post("/api/hermes/model")
 def api_hermes_model_update(req: ModelUpdateRequest):
-    success = update_hermes_model(req.model)
-    if not success:
-        raise HTTPException(status_code=500, detail="Gagal memperbarui model ke config Hermes")
-    return {"status": "ok", "active_model": req.model}
+    scope = update_hermes_model(req.model, apply_globally=bool(req.apply_globally))
+    if not scope:
+        raise HTTPException(status_code=500, detail="Gagal memperbarui model")
+    return {"status": "ok", "active_model": req.model.strip(), "scope": scope}
 
 @app.get("/api/system/status")
 async def get_system_status():
@@ -2187,7 +2357,9 @@ async def get_system_status():
     return {
         "router_ok": router_ok,
         "model": "bai (deepseek-v4.1-flash)",
-        "tailscale_ip": "100.104.131.60",
+        "public_host": os.environ.get("PUBLIC_HOST") or LAN_HOST or "",
+        "default_workspace": DEFAULT_WORKSPACE,
+        "auth_required": bool(AUTH_TOKEN),
         "running_count": running_count,
         "completed_count": completed_count,
         "total_tasks": len(tasks_store)
@@ -2200,3 +2372,12 @@ async def serve_index():
         with open(index_path, "r", encoding="utf-8") as f:
             return f.read()
     return "<h1>AI Team Dashboard is initializing...</h1>"
+
+if __name__ == "__main__":
+    # Local launcher (setup.sh). The systemd unit passes its own --host/--port.
+    import uvicorn
+    uvicorn.run(
+        "main:app",
+        host=os.environ.get("HOST", "127.0.0.1"),
+        port=int(os.environ.get("PORT", "8090")),
+    )
