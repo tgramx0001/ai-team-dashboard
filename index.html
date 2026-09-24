@@ -6,6 +6,12 @@
   <title>AI Team Workstation - Autonomous Multi-Agent OS</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-dart.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-javascript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -183,6 +189,13 @@
 
     <!-- Right: Quick Actions -->
     <div class="flex items-center gap-2">
+      <!-- Workstation Project Sessions Switcher -->
+      <button onclick="openWorkstationSessionsModal()" class="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium text-[#d0d6e0] bg-white/[0.03] hover:bg-white/[0.06] border border-subtle transition" title="Project Sessions (Multi-turn Workstreams)">
+        <span class="text-[10px] text-[#8a8f98] font-mono">session:</span>
+        <span id="topbarSessionLabel" class="font-medium text-[11px] text-brand-light truncate max-w-[130px]">Default</span>
+        <span class="text-[10px] text-[#8a8f98]">▾</span>
+      </button>
+
       <!-- Model Switcher Pill -->
       <button onclick="openModelModal()" class="flex items-center gap-1.5 px-2 sm:px-2.5 py-1 rounded-md bg-white/[0.03] hover:bg-white/[0.06] border border-subtle text-xs text-[#d0d6e0] transition" title="Ganti Model Hermes / LLM">
         <span class="text-[10px] text-[#8a8f98] font-mono">model:</span>
@@ -191,8 +204,8 @@
       </button>
 
       <!-- Hermes Sessions Button -->
-      <button onclick="openSessionsModal()" class="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium text-[#d0d6e0] bg-white/[0.03] hover:bg-white/[0.06] border border-subtle transition" title="Riwayat Sesi Telegram & Hermes">
-        <span>Sessions</span>
+      <button onclick="openSessionsModal()" class="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium text-[#d0d6e0] bg-white/[0.03] hover:bg-white/[0.06] border border-subtle transition" title="Riwayat Sesi Telegram & Hermes">
+        <span>Hermes</span>
       </button>
 
       <button onclick="openDrawer('workspace')" class="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium text-[#d0d6e0] bg-white/[0.03] hover:bg-white/[0.06] border border-subtle transition">
@@ -474,10 +487,21 @@
                 <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/20 text-amber-300">Awaiting Feedback</span>
               </div>
               <p class="text-[11px] text-amber-200/80 leading-relaxed">
-                Tinjau spesifikasi arsitektur di bawah sebelum Coder mulai mengimplementasikan kode. Berikan arahan revisi jika ada yang perlu disesuaikan.
+                Tinjau spesifikasi di bawah sebelum agen berikutnya bekerja. Berikan arahan revisi jika ada yang perlu disesuaikan.
               </p>
               <textarea id="approvalFeedbackInput" rows="2" placeholder="Catatan arahan / revisi tambahan untuk Coder (opsional)..." class="w-full bg-black/40 border border-amber-500/30 rounded p-2 text-xs text-white placeholder-amber-200/50 outline-none font-sans"></textarea>
-              <div class="flex items-center justify-end gap-2">
+              
+              <!-- Quick Feedback Chips -->
+              <div class="flex items-center gap-1.5 flex-wrap pt-0.5 select-none">
+                <span class="text-[10px] text-amber-300/70 font-mono">Quick Directives:</span>
+                <button type="button" onclick="insertApprovalChip('[Hanya Ubah Frontend] ')" class="px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/30 text-[10px] transition font-medium">Hanya Frontend</button>
+                <button type="button" onclick="insertApprovalChip('[Jangan Sentuh Database] ')" class="px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/30 text-[10px] transition font-medium">Jangan Sentuh DB</button>
+                <button type="button" onclick="insertApprovalChip('[Sederhanakan Kode / YAGNI] ')" class="px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/30 text-[10px] transition font-medium">Sederhana / YAGNI</button>
+                <button type="button" onclick="insertApprovalChip('[Fokus Fix Bug Saja] ')" class="px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/30 text-[10px] transition font-medium">Fix Bug Saja</button>
+                <button type="button" onclick="insertApprovalChip('[Tambahkan Unit Test] ')" class="px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/30 text-[10px] transition font-medium">+ Unit Test</button>
+              </div>
+
+              <div class="flex items-center justify-end gap-2 pt-1">
                 <button onclick="submitApproval('reject')" class="px-3 py-1.5 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 text-xs font-medium transition">
                   Batalkan Tugas
                 </button>
@@ -643,16 +667,28 @@
         <div class="absolute inset-y-0 -left-1 -right-1 cursor-col-resize"></div>
       </div>
 
-      <!-- Right: AGENTS.md Context Editor -->
-      <div class="flex-1 flex flex-col p-4 bg-panel/30 overflow-hidden">
+      <!-- Right: IDE File Editor & Diff Viewer -->
+      <div class="flex-1 flex flex-col p-3.5 bg-panel/30 overflow-hidden">
         <div class="flex items-center justify-between mb-2 select-none">
           <div class="truncate mr-2">
             <div class="text-xs font-semibold text-white flex items-center gap-1.5 truncate">
               <span id="drawerRuleFilename" class="text-brand-light font-mono truncate">AGENTS.md</span>
+              <span id="drawerSyntaxBadge" style="display: none;" class="text-[10px] font-mono px-1.5 py-0.2 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">Valid</span>
             </div>
             <p id="drawerEditorSublabel" class="text-[10px] text-[#8a8f98] truncate">Instruksi arsitektur ini otomatis disuntikkan ke setiap agent sebelum tugas diproses.</p>
           </div>
           <div class="flex items-center gap-2 shrink-0">
+            <!-- Mode switch: Code vs Diff -->
+            <div class="flex items-center rounded bg-white/[0.04] p-0.5 border border-subtle text-[11px]">
+              <button id="btnDrawerModeCode" onclick="setDrawerEditorMode('code')" class="px-2 py-0.5 rounded bg-brand text-white font-medium transition">Code</button>
+              <button id="btnDrawerModeDiff" onclick="setDrawerEditorMode('diff')" class="px-2 py-0.5 rounded text-[#8a8f98] hover:text-white transition">Diff (+/-)</button>
+            </div>
+            <button id="btnDrawerCheckSyntax" onclick="checkActiveDrawerSyntax()" title="Uji sintaks kompilasi file aktif" class="px-2 py-1 rounded bg-white/[0.04] hover:bg-white/[0.08] text-[#8a8f98] hover:text-white text-[11px] transition">
+              Check
+            </button>
+            <button id="btnDrawerRollback" onclick="rollbackActiveDrawerFile()" title="Rollback perubahan dari apply terakhir" class="px-2 py-1 rounded bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[11px] transition">
+              Undo
+            </button>
             <button id="btnSwitchAgentsMd" onclick="loadDefaultAgentsContext()" class="px-2 py-1 rounded bg-white/[0.04] hover:bg-white/[0.08] text-[#8a8f98] hover:text-[#d0d6e0] text-[11px] transition">
               AGENTS.md
             </button>
@@ -662,7 +698,37 @@
           </div>
         </div>
 
-        <textarea id="drawerAgentsTextarea" class="flex-1 w-full bg-canvas border border-subtle rounded-lg p-3 text-xs font-mono text-[#d0d6e0] placeholder-[#62666d] outline-none focus:border-white/20 resize-none leading-relaxed" placeholder="# Project Rules & Architecture&#10;&#10;Contoh:&#10;- Stack: Flutter + Laravel API.&#10;- Modular structure.&#10;- Seluruh method wajib ada type safety."></textarea>
+        <!-- IDE Editor Canvas with Line Numbers & Diff Viewer -->
+        <div id="drawerEditorCanvas" class="flex-1 flex flex-col relative overflow-hidden bg-canvas border border-subtle rounded-lg">
+          <div class="flex-1 flex overflow-hidden">
+            <div id="drawerLineGutter" class="w-10 bg-surface/80 border-r border-subtle py-3 text-right pr-2 select-none text-[11px] font-mono text-[#62666d] overflow-hidden whitespace-pre">1
+2
+3</div>
+            <textarea id="drawerAgentsTextarea" onscroll="syncGutterScroll()" oninput="updateGutterLines()" class="flex-1 bg-transparent p-3 text-xs font-mono text-[#d0d6e0] placeholder-[#62666d] outline-none resize-none leading-relaxed overflow-auto" placeholder="# Project Rules & Architecture&#10;&#10;Contoh:&#10;- Stack: Flutter + Laravel API.&#10;- Modular structure.&#10;- Seluruh method wajib ada type safety."></textarea>
+            <!-- Diff Container -->
+            <div id="drawerDiffContainer" style="display: none;" class="flex-1 p-3 text-xs font-mono overflow-auto space-y-0.5 bg-[#070809]">
+              <!-- Diff lines populated dynamically -->
+            </div>
+          </div>
+
+          <!-- Mini Terminal & Console Panel at Bottom of Drawer -->
+          <div id="drawerMiniTerminal" class="h-28 border-t border-subtle bg-[#050607] flex flex-col shrink-0">
+            <div class="h-6 px-3 bg-surface/70 border-b border-subtle flex items-center justify-between text-[10px] font-mono text-[#8a8f98] select-none">
+              <div class="flex items-center gap-2">
+                <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+                <span class="font-semibold text-slate-300">Terminal & Output</span>
+                <span id="drawerGitBranchBadge" class="text-brand-light font-bold"></span>
+              </div>
+              <div class="flex items-center gap-2">
+                <button type="button" onclick="fetchDrawerGitStatus()" class="hover:text-white transition">Git Status</button>
+                <button type="button" onclick="clearMiniTerminal()" class="hover:text-white transition">Clear</button>
+              </div>
+            </div>
+            <div id="drawerTerminalLogs" class="flex-1 p-2 text-[10px] font-mono text-[#8a8f98] overflow-y-auto space-y-1">
+              <div class="text-slate-500">> Ready. Project console initialized.</div>
+            </div>
+          </div>
+        </div>
       </div>
 
     </div>
@@ -699,6 +765,33 @@
       <div class="flex justify-end gap-2 pt-2 border-t border-subtle">
         <button onclick="closeAgentModal()" class="px-3 py-1.5 text-xs text-[#8a8f98] hover:text-white">Batal</button>
         <button onclick="saveAgentModalChanges()" class="px-3 py-1.5 rounded bg-brand hover:bg-brand-hover text-white text-xs font-semibold transition">Terapkan</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= WORKSTATION PROJECT SESSIONS MODAL ================= -->
+  <div id="workstationSessionsModal" style="display: none;" onclick="closeWorkstationSessionsModal()" class="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5">
+    <div onclick="event.stopPropagation()" class="w-full max-w-2xl bg-panel border border-subtle rounded-xl shadow-2xl flex flex-col overflow-hidden max-h-[85vh]">
+      <div class="h-12 border-b border-subtle px-4 flex items-center justify-between bg-surface/50 shrink-0">
+        <div class="flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full bg-brand"></span>
+          <h3 class="text-xs font-semibold text-white tracking-wide uppercase">Project Sessions (Multi-Turn Workstreams)</h3>
+          <span id="wsSessionCountBadge" class="text-[10px] font-mono px-2 py-0.5 rounded-full bg-brand/20 text-brand-light">1 Session</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <button onclick="createNewSessionPrompt()" class="px-2.5 py-1 rounded bg-brand hover:bg-brand-hover text-white text-xs font-semibold shadow-sm transition active:scale-95">
+            + Sesi Baru
+          </button>
+          <button onclick="closeWorkstationSessionsModal()" class="p-1 rounded text-[#8a8f98] hover:text-white transition">✕</button>
+        </div>
+      </div>
+
+      <div class="p-3 border-b border-subtle bg-canvas/30 text-xs text-[#8a8f98] leading-relaxed">
+        Setiap sesi menyimpan riwayat pengerjaan tugas proyek. Tugas baru di dalam sesi yang sama akan otomatis membaca deliverable dan file dari tugas sebelumnya (multi-turn follow up).
+      </div>
+
+      <div id="wsSessionsListContainer" class="flex-1 overflow-y-auto divide-y divide-subtle/40 p-2 space-y-1">
+        <!-- Dynamically populated via JS -->
       </div>
     </div>
   </div>
@@ -1389,6 +1482,7 @@
         data.forEach(p => presets[p.id] = p);
         
         selectPreset('auto');
+        await fetchWorkstationSessions();
         await loadHermesSkills();
         await loadHermesModel();
         await setWorkspace(currentWorkspace);
@@ -1630,6 +1724,11 @@
         const d = await res.json();
         document.getElementById('drawerAgentsTextarea').value = d.content;
         setActiveDrawerFile(relPath, relPath.toLowerCase() === 'agents.md');
+        updateGutterLines();
+        setDrawerEditorMode('code');
+        const badge = document.getElementById('drawerSyntaxBadge');
+        if (badge) badge.style.display = 'none';
+        appendMiniTerminal(`> Opened file: ${relPath} (${d.content.split('\n').length} lines)`);
         if (!silent) showToast(`Dibuka: ${relPath.split('/').pop()}`, '✓');
       } catch (e) {
         if (!silent) showToast('Gagal memuat file', '✕');
@@ -1657,12 +1756,14 @@
         }
 
         if (res.ok) {
+          appendMiniTerminal(`✓ Saved file: ${relPath}`);
           showToast(`Berhasil menyimpan ${relPath.split('/').pop()}!`, '✓');
           if (relPath.toLowerCase() === 'agents.md') {
             await setWorkspace(currentWorkspace);
           }
         } else {
           const err = await res.json();
+          appendMiniTerminal(`✕ Error saving: ${err.detail || 'Failed'}`);
           showToast(err.detail || 'Gagal menyimpan.', '✕');
         }
       } catch (e) {
@@ -2034,6 +2135,7 @@
             working_directory: currentWorkspace,
             project_context: workspaceInfo?.agents_md || null,
             skills: selectedSkills,
+            session_id: activeWorkstationSessionId || 'default',
             auto_save_artifact: autoSave,
             auto_apply_files: autoApplyFiles,
             require_approval: requireApproval,
@@ -2177,6 +2279,10 @@
           borderClass = 'border-emerald-500/20 bg-emerald-500/5 text-emerald-400';
           statusDot = '<span class="text-[10px] text-emerald-400">✓</span>';
           statusLabel = 'Done';
+        } else if (s.status === 'bypassed') {
+          borderClass = 'border-slate-700/50 bg-slate-900/30 text-slate-400 opacity-60 hover:opacity-100';
+          statusDot = '<span class="text-[9px] text-slate-400 font-mono">⊘</span>';
+          statusLabel = 'Bypassed';
         } else if (s.status === 'error') {
           borderClass = 'border-rose-500/30 bg-rose-500/10 text-rose-300';
           statusDot = '<span class="text-[10px] text-rose-400">✕</span>';
@@ -2185,6 +2291,8 @@
 
         const roleOrErr = (s.status === 'error' && s.error) 
           ? `<span class="text-rose-400 font-medium truncate block" title="${escapeHtml(s.error)}">✕ ${escapeHtml(s.error.split(':')[0])}</span>`
+          : (s.status === 'bypassed')
+          ? `<span class="text-slate-400 font-mono text-[9px] truncate block" title="${escapeHtml(s.output || 'Di luar scope')}">Out of Scope</span>`
           : `<span class="text-[#8a8f98] font-mono truncate block">${escapeHtml(s.role)}</span>`;
 
         return `
@@ -2239,7 +2347,17 @@
       const stagesLogEl = document.getElementById('stagesLogContainer');
       stagesLogEl.innerHTML = task.stages.map((s, idx) => {
         let contentHtml = '';
-        if (s.status === 'error') {
+        if (s.status === 'bypassed') {
+          contentHtml = `
+            <div class="p-3.5 rounded-lg border border-slate-700/50 bg-slate-900/30 text-slate-400 font-mono text-xs flex items-center justify-between">
+              <div>
+                <span class="font-bold text-slate-300">STAGE BYPASSED (OUT OF SCOPE)</span>
+                <p class="text-[11px] text-slate-400 mt-1 whitespace-pre-wrap">${escapeHtml(s.output || 'Peran ini dilewati secara otomatis oleh sistem karena berada di luar batasan Scope Matrix.')}</p>
+              </div>
+              <span class="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-800 text-slate-400 border border-slate-700/60 shrink-0">0s Latency</span>
+            </div>
+          `;
+        } else if (s.status === 'error') {
           contentHtml = `
             <div class="p-3.5 rounded-lg border border-rose-500/30 bg-rose-500/10 text-rose-300 font-mono text-xs space-y-2">
               <div class="font-bold flex items-center gap-1.5 text-rose-200 text-xs">
@@ -2258,14 +2376,14 @@
         }
 
         return `
-          <div id="stageLogCard_${idx}" class="rounded-xl border ${s.status === 'running' ? 'border-brand/40 bg-panel' : (s.status === 'error' ? 'border-rose-500/40 bg-panel' : 'border-subtle bg-panel/70')} overflow-hidden transition">
+          <div id="stageLogCard_${idx}" class="rounded-xl border ${s.status === 'running' ? 'border-brand/40 bg-panel' : (s.status === 'error' ? 'border-rose-500/40 bg-panel' : (s.status === 'bypassed' ? 'border-slate-800 bg-panel/40 opacity-70' : 'border-subtle bg-panel/70'))} overflow-hidden transition">
             <div class="px-4 py-2.5 border-b border-subtle flex items-center justify-between bg-surface/50">
               <div class="flex items-center gap-2">
                 <span class="text-sm">${s.icon || '🤖'}</span>
                 <span class="text-xs font-semibold text-white">${s.name}</span>
                 <span class="text-[10px] font-mono text-[#8a8f98]">(${s.role})</span>
               </div>
-              <span class="text-[10px] font-mono px-2 py-0.5 rounded-full ${s.status === 'completed' ? 'bg-emerald-500/10 text-emerald-400' : (s.status === 'error' ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30' : 'bg-white/[0.03] text-[#8a8f98]')}">
+              <span class="text-[10px] font-mono px-2 py-0.5 rounded-full ${s.status === 'completed' ? 'bg-emerald-500/10 text-emerald-400' : (s.status === 'error' ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30' : (s.status === 'bypassed' ? 'bg-slate-800 text-slate-400 border border-slate-700/60' : 'bg-white/[0.03] text-[#8a8f98]'))}">
                 ${s.status.toUpperCase()}
               </span>
             </div>
@@ -2285,19 +2403,45 @@
         return;
       }
 
-      container.innerHTML = files.map((f, idx) => `
-        <div class="rounded-lg border border-subtle bg-surface/60 overflow-hidden text-xs">
-          <div class="px-3 py-2 bg-surface border-b border-subtle flex items-center justify-between">
-            <div class="flex items-center gap-2">
-              <span>📄</span>
-              <span class="font-mono text-white font-medium">${f.path}</span>
-              <span class="text-[10px] text-[#8a8f98] px-1.5 py-0.5 rounded bg-black/40 font-mono">${f.language} · ${f.lines} baris</span>
+      let headerHtml = '';
+      if (task.applied_files && task.applied_files.length) {
+        headerHtml = `
+          <div class="p-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 mb-3 flex items-center justify-between">
+            <div class="flex items-center gap-2 text-xs text-emerald-400">
+              <span>✓</span>
+              <span><strong>${task.applied_files.length} file</strong> telah diterapkan ke workspace disk.</span>
             </div>
-            <button onclick="copyFileContent(${idx})" class="text-[#8a8f98] hover:text-white text-[11px] transition">Salin Kode</button>
+            <button onclick="rollbackActiveDrawerFile()" class="px-2.5 py-1 rounded bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 text-xs font-medium transition flex items-center gap-1">
+              <span>↺</span> Undo / Rollback
+            </button>
           </div>
-          <pre class="p-3 text-[11px] font-mono text-[#d0d6e0] overflow-x-auto bg-[#0a0b0c] max-h-64"><code>${escapeHtml(f.content)}</code></pre>
-        </div>
-      `).join('');
+        `;
+      }
+
+      container.innerHTML = headerHtml + files.map((f, idx) => {
+        const isBlocked = f.blocked;
+        const blockedBadge = isBlocked 
+          ? `<span class="text-[10px] text-rose-400 bg-rose-500/10 border border-rose-500/30 px-1.5 py-0.5 rounded font-mono font-medium" title="${escapeHtml(f.blocked_reason || '')}">BLOCKED BY SCOPE MATRIX</span>`
+          : '';
+
+        return `
+          <div class="rounded-lg border ${isBlocked ? 'border-rose-500/30 bg-rose-500/5 opacity-85' : 'border-subtle bg-surface/60'} overflow-hidden text-xs">
+            <div class="px-3 py-2 bg-surface border-b border-subtle flex items-center justify-between">
+              <div class="flex items-center gap-2">
+                <span>📄</span>
+                <span class="font-mono text-white font-medium ${isBlocked ? 'line-through text-rose-300' : ''}">${f.path}</span>
+                <span class="text-[10px] text-[#8a8f98] px-1.5 py-0.5 rounded bg-black/40 font-mono">${f.language} · ${f.lines} baris</span>
+                ${blockedBadge}
+              </div>
+              <div class="flex items-center gap-2">
+                <button onclick="previewDiffForExtractedFile(${idx})" class="text-brand-light hover:text-white text-[11px] transition">Diff (+/-)</button>
+                <button onclick="copyFileContent(${idx})" class="text-[#8a8f98] hover:text-white text-[11px] transition">Salin Kode</button>
+              </div>
+            </div>
+            <pre class="p-3 text-[11px] font-mono text-[#d0d6e0] overflow-x-auto bg-[#0a0b0c] max-h-64"><code>${escapeHtml(f.content)}</code></pre>
+          </div>
+        `;
+      }).join('');
     }
 
     function escapeHtml(string) {
@@ -2549,6 +2693,413 @@
         }).join('');
       } catch (e) {
         console.error('Fetch tasks error:', e);
+      }
+    }
+
+    /* ================= IDE DRAWER, DIFF VIEWER & SYNTAX CHECKER ================= */
+    function updateGutterLines() {
+      const ta = document.getElementById('drawerAgentsTextarea');
+      const gutter = document.getElementById('drawerLineGutter');
+      if (!ta || !gutter) return;
+      const count = (ta.value.match(/\n/g) || []).length + 1;
+      let s = '';
+      for (let i = 1; i <= count; i++) {
+        s += i + '\n';
+      }
+      gutter.innerText = s;
+    }
+
+    function syncGutterScroll() {
+      const ta = document.getElementById('drawerAgentsTextarea');
+      const gutter = document.getElementById('drawerLineGutter');
+      if (ta && gutter) {
+        gutter.scrollTop = ta.scrollTop;
+      }
+    }
+
+    let currentDrawerEditorMode = 'code';
+
+    async function setDrawerEditorMode(mode) {
+      currentDrawerEditorMode = mode;
+      const btnCode = document.getElementById('btnDrawerModeCode');
+      const btnDiff = document.getElementById('btnDrawerModeDiff');
+      const ta = document.getElementById('drawerAgentsTextarea');
+      const gutter = document.getElementById('drawerLineGutter');
+      const diffBox = document.getElementById('drawerDiffContainer');
+
+      if (mode === 'diff') {
+        if (btnDiff) btnDiff.className = 'px-2 py-0.5 rounded bg-brand text-white font-medium transition';
+        if (btnCode) btnCode.className = 'px-2 py-0.5 rounded text-[#8a8f98] hover:text-white transition';
+        if (ta) ta.style.display = 'none';
+        if (gutter) gutter.style.display = 'none';
+        if (diffBox) diffBox.style.display = 'block';
+        await renderDrawerDiff();
+      } else {
+        if (btnCode) btnCode.className = 'px-2 py-0.5 rounded bg-brand text-white font-medium transition';
+        if (btnDiff) btnDiff.className = 'px-2 py-0.5 rounded text-[#8a8f98] hover:text-white transition';
+        if (ta) ta.style.display = 'block';
+        if (gutter) gutter.style.display = 'block';
+        if (diffBox) diffBox.style.display = 'none';
+      }
+    }
+
+    async function renderDrawerDiff() {
+      const diffBox = document.getElementById('drawerDiffContainer');
+      const ta = document.getElementById('drawerAgentsTextarea');
+      if (!diffBox || !ta) return;
+      diffBox.innerHTML = '<div class="text-xs text-[#8a8f98] py-4 text-center">Menghitung visual diff...</div>';
+
+      const relP = currentActiveDrawerFile || 'AGENTS.md';
+      try {
+        const res = await fetch('/api/workspace/diff', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            path: currentWorkspace,
+            rel_path: relP,
+            new_content: ta.value
+          })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Gagal menghitung diff');
+
+        if (!data.diff_lines || !data.diff_lines.length) {
+          diffBox.innerHTML = '<div class="text-xs text-slate-400 py-6 text-center font-mono">Tidak ada perbedaan dengan file di disk (konten identik).</div>';
+          return;
+        }
+
+        let html = `<div class="mb-2 flex items-center justify-between text-[11px] font-mono px-1">
+          <span class="text-slate-300 font-semibold">${escapeHtml(data.rel_path)}</span>
+          <div class="flex items-center gap-2">
+            <span class="text-emerald-400 font-bold">+${data.additions} lines</span>
+            <span class="text-rose-400 font-bold">-${data.deletions} lines</span>
+          </div>
+        </div>`;
+
+        html += '<div class="divide-y divide-subtle/30 rounded border border-subtle bg-black/50 overflow-x-auto select-text">';
+        data.diff_lines.forEach(l => {
+          let bg = '';
+          let textCol = 'text-[#d0d6e0]';
+          let prefix = ' ';
+          if (l.type === 'add') {
+            bg = 'bg-emerald-500/15 text-emerald-300';
+            prefix = '+';
+          } else if (l.type === 'del') {
+            bg = 'bg-rose-500/15 text-rose-300';
+            prefix = '-';
+          } else if (l.type === 'chunk') {
+            bg = 'bg-brand/20 text-brand-light font-bold text-[10px]';
+            prefix = '@';
+          }
+          html += `<div class="px-2 py-0.5 text-[11px] font-mono ${bg} ${textCol} whitespace-pre"><span class="select-none inline-block w-4 text-[#62666d]">${prefix}</span>${escapeHtml(l.text)}</div>`;
+        });
+        html += '</div>';
+        diffBox.innerHTML = html;
+      } catch (err) {
+        diffBox.innerHTML = `<div class="text-xs text-rose-400 py-2">Error: ${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    async function previewDiffForExtractedFile(idx) {
+      if (!currentTaskId) return;
+      const res = await fetch(`/api/tasks/${currentTaskId}`);
+      const task = await res.json();
+      const file = (task.extracted_files || [])[idx];
+      if (!file) return;
+
+      openDrawer('workspace');
+      currentActiveDrawerFile = file.path;
+      document.getElementById('drawerRuleFilename').innerText = file.path;
+      document.getElementById('drawerAgentsTextarea').value = file.content;
+      updateGutterLines();
+      setDrawerEditorMode('diff');
+      appendMiniTerminal(`> Previewing diff for extracted file: ${file.path}`);
+    }
+
+    async function checkActiveDrawerSyntax() {
+      const ta = document.getElementById('drawerAgentsTextarea');
+      const badge = document.getElementById('drawerSyntaxBadge');
+      const relP = currentActiveDrawerFile || 'AGENTS.md';
+
+      appendMiniTerminal(`> Checking syntax for: ${relP}...`);
+      try {
+        const res = await fetch('/api/workspace/check-syntax', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            rel_path: relP,
+            content: ta.value
+          })
+        });
+        const data = await res.json();
+        if (data.valid) {
+          if (badge) {
+            badge.className = 'text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
+            badge.innerText = 'Syntax Valid';
+            badge.style.display = 'inline-block';
+          }
+          appendMiniTerminal(`✓ [VALID] ${data.message}`);
+          showToast('Sintaks Valid (Bebas Error)', '✓');
+        } else {
+          if (badge) {
+            badge.className = 'text-[10px] font-mono px-1.5 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/20';
+            badge.innerText = `Line ${data.line || '?'}: Error`;
+            badge.style.display = 'inline-block';
+          }
+          appendMiniTerminal(`✕ [ERROR] ${data.message}`);
+          showToast(data.message, '✕');
+        }
+      } catch (e) {
+        appendMiniTerminal(`✕ Syntax check failed: ${e.message}`);
+      }
+    }
+
+    async function rollbackActiveDrawerFile() {
+      const confirmed = await openConfirmDialog({
+        title: 'Rollback Perubahan Codebase',
+        message: 'Apakah Anda yakin ingin mengembalikan seluruh file yang baru saja diterapkan ke kondisi snapshot sebelumnya? File yang ada sebelum apply akan dipulihkan dari cadangan (.bak), dan file baru akan dihapus.',
+        confirmText: 'Rollback Sekarang',
+        danger: true
+      });
+      if (!confirmed) return;
+
+      appendMiniTerminal('> Rolling back last applied changes...');
+      try {
+        const res = await fetch('/api/workspace/rollback', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: currentWorkspace })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Gagal rollback');
+
+        appendMiniTerminal(`✓ [ROLLBACK SUCCESS] ${data.restored_count} file berhasil dipulihkan.`);
+        (data.restored || []).forEach(r => {
+          appendMiniTerminal(`   ↺ ${r.path} (${r.action})`);
+        });
+        showToast(`Rollback sukses: ${data.restored_count} file dipulihkan`, '↺');
+        if (currentActiveDrawerFile) {
+          previewDrawerFile(currentActiveDrawerFile, true);
+        }
+        fetchDrawerGitStatus();
+        await setWorkspace(currentWorkspace);
+      } catch (e) {
+        appendMiniTerminal(`✕ [ROLLBACK FAILED] ${e.message}`);
+        showToast(e.message, '✕');
+      }
+    }
+
+    function appendMiniTerminal(text) {
+      const box = document.getElementById('drawerTerminalLogs');
+      if (!box) return;
+      const line = document.createElement('div');
+      line.className = text.startsWith('✓') ? 'text-emerald-400' : (text.startsWith('✕') ? 'text-rose-400' : (text.startsWith('>') ? 'text-[#8a8f98]' : 'text-[#d0d6e0]'));
+      line.innerText = text;
+      box.appendChild(line);
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function clearMiniTerminal() {
+      const box = document.getElementById('drawerTerminalLogs');
+      if (box) box.innerHTML = '<div class="text-slate-500">> Console cleared.</div>';
+    }
+
+    async function fetchDrawerGitStatus() {
+      appendMiniTerminal(`> git status (${currentWorkspace})...`);
+      try {
+        const res = await fetch(`/api/workspace/info?path=${encodeURIComponent(currentWorkspace)}`);
+        const data = await res.json();
+        const git = data.git || {};
+        const badge = document.getElementById('drawerGitBranchBadge');
+        if (git.is_git) {
+          if (badge) badge.innerText = `[${git.branch || 'HEAD'}]`;
+          if (git.status_lines && git.status_lines.length) {
+            git.status_lines.forEach(l => appendMiniTerminal(`  ${l}`));
+          } else {
+            appendMiniTerminal('  Working tree clean (tidak ada perubahan uncommitted).');
+          }
+        } else {
+          if (badge) badge.innerText = '';
+          appendMiniTerminal('  (Bukan repositori git)');
+        }
+      } catch (e) {
+        appendMiniTerminal(`  Error: ${e.message}`);
+      }
+    }
+
+    /* ================= WORKSTATION PROJECT SESSIONS ================= */
+    let workstationSessions = [];
+    let activeWorkstationSessionId = 'default';
+
+    async function fetchWorkstationSessions() {
+      try {
+        const res = await fetch('/api/workstation/sessions');
+        const data = await res.json();
+        workstationSessions = data.sessions || [];
+        renderWorkstationSessionsUI();
+      } catch (e) {
+        console.error('Fetch workstation sessions error:', e);
+      }
+    }
+
+    function renderWorkstationSessionsUI() {
+      const active = workstationSessions.find(s => s.id === activeWorkstationSessionId) || workstationSessions[0];
+      const label = document.getElementById('topbarSessionLabel');
+      if (label && active) {
+        label.innerText = active.title;
+      }
+      const badge = document.getElementById('wsSessionCountBadge');
+      if (badge) {
+        badge.innerText = `${workstationSessions.length} Sessions`;
+      }
+
+      const container = document.getElementById('wsSessionsListContainer');
+      if (!container) return;
+
+      if (!workstationSessions.length) {
+        container.innerHTML = '<div class="text-center py-6 text-xs text-[#8a8f98]">Belum ada sesi proyek.</div>';
+        return;
+      }
+
+      container.innerHTML = workstationSessions.map(s => {
+        const isActive = s.id === activeWorkstationSessionId;
+        const taskCount = (s.task_ids || []).length;
+        const dateStr = new Date(s.updated_at * 1000).toLocaleDateString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+
+        return `
+          <div onclick="switchWorkstationSession('${s.id}')" class="p-2.5 rounded-lg border ${isActive ? 'border-brand bg-brand/10' : 'border-subtle bg-white/[0.02] hover:bg-white/[0.04]'} cursor-pointer transition flex items-center justify-between group">
+            <div class="min-w-0 pr-2">
+              <div class="flex items-center gap-1.5">
+                <span class="text-xs font-semibold ${isActive ? 'text-brand-light' : 'text-white'} truncate">${escapeHtml(s.title)}</span>
+                ${s.pinned ? '<span class="text-[9px] text-amber-400 font-mono">PINNED</span>' : ''}
+                ${isActive ? '<span class="text-[9px] px-1.5 py-0.2 rounded bg-brand/30 text-white font-mono">ACTIVE</span>' : ''}
+              </div>
+              <div class="text-[10px] text-[#8a8f98] font-mono mt-0.5 truncate">
+                ${taskCount} tasks · diperbarui ${dateStr}
+              </div>
+            </div>
+            <div class="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition shrink-0" onclick="event.stopPropagation()">
+              <button onclick="renameWorkstationSessionPrompt('${s.id}')" class="p-1 rounded text-[#8a8f98] hover:text-white text-xs" title="Ganti Nama">✎</button>
+              <button onclick="togglePinWorkstationSession('${s.id}')" class="p-1 rounded ${s.pinned ? 'text-amber-400' : 'text-[#8a8f98] hover:text-white'} text-xs" title="${s.pinned ? 'Lepas Pin' : 'Pin Sesi'}">★</button>
+              ${s.id !== 'default' ? `<button onclick="deleteWorkstationSessionPrompt('${s.id}')" class="p-1 rounded text-[#8a8f98] hover:text-rose-400 text-xs" title="Hapus Sesi">✕</button>` : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function openWorkstationSessionsModal() {
+      fetchWorkstationSessions();
+      const modal = document.getElementById('workstationSessionsModal');
+      if (modal) modal.style.display = 'flex';
+    }
+
+    function closeWorkstationSessionsModal() {
+      const modal = document.getElementById('workstationSessionsModal');
+      if (modal) modal.style.display = 'none';
+    }
+
+    function switchWorkstationSession(id) {
+      activeWorkstationSessionId = id;
+      renderWorkstationSessionsUI();
+      closeWorkstationSessionsModal();
+      const s = workstationSessions.find(item => item.id === id);
+      if (s) {
+        showToast(`Beralih ke sesi: ${s.title}`, '✓');
+        newDraftTask();
+      }
+    }
+
+    async function createNewSessionPrompt() {
+      const title = await openInputDialog({
+        title: 'Buat Sesi Proyek Baru',
+        message: 'Nama sesi proyek (multi-turn workstream):',
+        placeholder: 'Refactor Auth & JWT, Integrasi Payment, dll.',
+        confirmText: 'Buat Sesi'
+      });
+      if (!title || !title.trim()) return;
+
+      try {
+        const res = await fetch('/api/workstation/sessions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: title.trim(),
+            working_directory: currentWorkspace
+          })
+        });
+        const s = await res.json();
+        activeWorkstationSessionId = s.id;
+        await fetchWorkstationSessions();
+        closeWorkstationSessionsModal();
+        newDraftTask();
+        showToast(`Sesi "${s.title}" berhasil dibuat`, '✓');
+      } catch (e) {
+        showToast(e.message, '✕');
+      }
+    }
+
+    async function renameWorkstationSessionPrompt(id) {
+      const s = workstationSessions.find(item => item.id === id);
+      if (!s) return;
+      const newTitle = await openInputDialog({
+        title: 'Ubah Nama Sesi',
+        message: 'Masukkan nama baru untuk sesi ini:',
+        defaultValue: s.title,
+        confirmText: 'Simpan Nama'
+      });
+      if (!newTitle || !newTitle.trim()) return;
+
+      try {
+        await fetch(`/api/workstation/sessions/${id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: newTitle.trim() })
+        });
+        await fetchWorkstationSessions();
+        showToast('Nama sesi diperbarui', '✓');
+      } catch (e) {
+        showToast(e.message, '✕');
+      }
+    }
+
+    async function togglePinWorkstationSession(id) {
+      const s = workstationSessions.find(item => item.id === id);
+      if (!s) return;
+      try {
+        await fetch(`/api/workstation/sessions/${id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pinned: !s.pinned })
+        });
+        await fetchWorkstationSessions();
+      } catch (e) {
+        showToast(e.message, '✕');
+      }
+    }
+
+    async function deleteWorkstationSessionPrompt(id) {
+      if (id === 'default') {
+        showToast('Sesi default tidak dapat dihapus', '⚠️');
+        return;
+      }
+      const confirmed = await openConfirmDialog({
+        title: 'Hapus Sesi Proyek',
+        message: 'Apakah Anda yakin ingin menghapus sesi proyek ini dari daftar?',
+        confirmText: 'Hapus Sesi',
+        danger: true
+      });
+      if (!confirmed) return;
+
+      try {
+        await fetch(`/api/workstation/sessions/${id}`, { method: 'DELETE' });
+        if (activeWorkstationSessionId === id) {
+          activeWorkstationSessionId = 'default';
+        }
+        await fetchWorkstationSessions();
+        showToast('Sesi berhasil dihapus', '✓');
+      } catch (e) {
+        showToast(e.message, '✕');
       }
     }
 

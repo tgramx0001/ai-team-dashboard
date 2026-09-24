@@ -1,5 +1,8 @@
 __pycache__/
 *.pyc
 tasks.json
+sessions.json
+DELIVERABLE_*.md
+.snapshots/
 *.bak
 .DS_Store

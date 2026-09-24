@@ -1,6 +1,8 @@
 import asyncio
+import difflib
 import json
 import os
+import py_compile
 import re
 import shutil
 import sqlite3
@@ -273,7 +275,12 @@ SPECIALIST_CATALOG: Dict[str, Dict[str, Any]] = {
         "system": (
             "Kamu adalah Lead Full-Stack Developer handal. Tulis kode implementasi produksi yang bersih, modular, dan lengkap (backend/frontend). Tanpa placeholder malas (tulis kode nyata).\n\n"
             "PENTING: Setiap file kode yang kamu buat/ubah WAJIB ditulis dengan header format multi-file terpisah berikut:\n"
-            "### FILE: path/to/file.ext\n```ext\n// kode lengkap di sini\n```"
+            "### FILE: path/to/file.ext\n```ext\n// kode lengkap di sini\n```\n\n"
+            "ANTI-GREENFIELD & CODE INTEGRITY RULES (STRICT):\n"
+            "1. DILARANG KERAS merombak atau menulis ulang seluruh file proyek dari nol menjadi stub ringkas/dummy!\n"
+            "2. PERTAHANKAN seluruh endpoint, fungsi, router, model, dan struktur logika yang sudah ada sebelumnya. Lakukan HANYA perubahan bertarget (surgical targeted implementation) sesuai instruksi tugas.\n"
+            "3. DILARANG KERAS memalsukan logika nyata dengan timer tidur tiruan (seperti asyncio.sleep palsu untuk menggantikan proses riil).\n"
+            "4. Wajib patuhi batasan Scope Matrix: dilarang menyentuh file dalam forbidden_files."
         )
     },
     "Security": {
@@ -291,7 +298,15 @@ SPECIALIST_CATALOG: Dict[str, Dict[str, Any]] = {
         "icon": "🛡️",
         "temperature": 0.1,
         "system": (
-            "Kamu adalah Senior QA & Security Engineer. Audit kode dari Coder. Cari celah keamanan, race condition, error penanganan null, dan edge case. Periksa apakah kode sesuai dengan struktur proyek.\n\nPENTING: Di baris paling akhir dari evaluasimu, WAJIB tuliskan satu baris penutup status:\nVERDICT: PASSED atau VERDICT: NEEDS_REVISION\nJika NEEDS_REVISION, sertakan daftar ringkas poin bug yang wajib diperbaiki."
+            "Kamu adalah Senior QA & Security Engineer. Audit kode dari Coder. Cari celah keamanan, race condition, error penanganan null, dan edge case. Periksa apakah kode sesuai dengan struktur proyek.\n\n"
+            "REGRESSION & SCOPE GATE (STRICT):\n"
+            "1. Periksa apakah ada fungsi/fitur/endpoint lama yang terhapus atau disederhanakan tanpa izin.\n"
+            "2. Periksa apakah Coder menggunakan mock timers/stub palsu (seperti asyncio.sleep).\n"
+            "3. Periksa apakah kode melanggar batasan Scope Matrix (mengubah forbidden_files).\n"
+            "Jika ditemukan regresi, stub malas, atau pelanggaran scope, WAJIB tolak dengan VERDICT: NEEDS_REVISION.\n\n"
+            "PENTING: Di baris paling akhir dari evaluasimu, WAJIB tuliskan satu baris penutup status:\n"
+            "VERDICT: PASSED atau VERDICT: NEEDS_REVISION\n"
+            "Jika NEEDS_REVISION, sertakan daftar ringkas poin bug yang wajib diperbaiki."
         )
     },
     "Researcher": {
@@ -332,7 +347,7 @@ SPECIALIST_CATALOG: Dict[str, Dict[str, Any]] = {
     }
 }
 
-def parse_orchestrator_plan(text: str) -> List[Dict[str, Any]]:
+def parse_orchestrator_plan(text: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     m = re.search(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', text)
     data = None
     if m:
@@ -347,6 +362,19 @@ def parse_orchestrator_plan(text: str) -> List[Dict[str, Any]]:
                 data = json.loads(m_bare.group(1))
             except Exception:
                 pass
+
+    scope_matrix = {}
+    if data and isinstance(data, dict):
+        scope_matrix = {
+            "task_type": data.get("task_type", "GENERAL"),
+            "target_scope": data.get("target_scope") or data.get("scope", "General targeted changes"),
+            "allowed_files": data.get("allowed_files", []),
+            "forbidden_files": data.get("forbidden_files", []),
+            "selected_roles": data.get("selected_roles", []),
+            "bypassed_roles": data.get("bypassed_roles", []),
+            "role_boundaries": data.get("role_boundaries", {}),
+            "reasoning": data.get("reasoning", "")
+        }
 
     stages = []
     if data and isinstance(data, dict):
@@ -374,12 +402,48 @@ def parse_orchestrator_plan(text: str) -> List[Dict[str, Any]]:
         text_lower = text.lower()
         if any(w in text_lower for w in ["security", "audit", "vulnerability", "celah", "injection", "token"]):
             fallback_roles = ["Security", "Coder", "QA"]
+            scope_matrix = {
+                "task_type": "SECURITY_AUDIT",
+                "target_scope": "Security Audit & Vulnerability Mitigation",
+                "allowed_files": [],
+                "forbidden_files": [],
+                "selected_roles": ["Security", "Coder", "QA"],
+                "bypassed_roles": ["UI/UX", "Architect", "Researcher", "Writer"],
+                "role_boundaries": {"Security": "Audit celah", "Coder": "Patch keamanan saja", "QA": "Verifikasi patch"}
+            }
         elif any(w in text_lower for w in ["kuliah", "makalah", "riset", "paper", "jurnal"]):
             fallback_roles = ["Researcher", "Writer", "Reviewer"]
+            scope_matrix = {
+                "task_type": "ACADEMIC",
+                "target_scope": "Karya Ilmiah / Riset Akademik",
+                "allowed_files": ["*.md"],
+                "forbidden_files": [],
+                "selected_roles": ["Researcher", "Writer", "Reviewer"],
+                "bypassed_roles": ["UI/UX", "Coder", "Security"],
+                "role_boundaries": {}
+            }
         elif any(w in text_lower for w in ["ui", "ux", "tampilan", "layar", "screen", "frontend", "flutter"]):
             fallback_roles = ["Architect", "UI/UX", "Coder", "QA"]
+            scope_matrix = {
+                "task_type": "FRONTEND_UI",
+                "target_scope": "Pengembangan antarmuka & styling UI/UX",
+                "allowed_files": ["index.html"],
+                "forbidden_files": ["main.py", "test_security.py"],
+                "selected_roles": ["Architect", "UI/UX", "Coder", "QA"],
+                "bypassed_roles": ["Security", "Researcher"],
+                "role_boundaries": {"Coder": "Hanya modifikasi frontend"}
+            }
         else:
             fallback_roles = ["Architect", "Coder", "QA"]
+            scope_matrix = {
+                "task_type": "FEATURE_DEV",
+                "target_scope": "Pengembangan fitur",
+                "allowed_files": [],
+                "forbidden_files": [],
+                "selected_roles": ["Architect", "Coder", "QA"],
+                "bypassed_roles": ["UI/UX", "Researcher"],
+                "role_boundaries": {}
+            }
         for r in fallback_roles:
             spec = SPECIALIST_CATALOG[r]
             stages.append({
@@ -393,14 +457,14 @@ def parse_orchestrator_plan(text: str) -> List[Dict[str, Any]]:
                 "error": None
             })
 
-    return stages
+    return stages, scope_matrix
 
 PRESETS: Dict[str, Dict[str, Any]] = {
     "auto": {
         "id": "auto",
         "title": "Mode Auto-Pilot (Dynamic Orchestrator)",
         "icon": "🤖",
-        "description": "Orchestrator AI menganalisis tugas dan otomatis memilih tim spesialis yang tepat (mem-bypass UI/UX jika tidak dibutuhkan).",
+        "description": "Orchestrator AI menganalisis tugas, menyusun Scope Matrix perlindungan file, dan memilih tim spesialis yang tepat.",
         "stages": [
             {
                 "role": "Orchestrator",
@@ -408,11 +472,11 @@ PRESETS: Dict[str, Dict[str, Any]] = {
                 "icon": "🧠",
                 "temperature": 0.1,
                 "system": (
-                    "Kamu adalah AI Team Orchestrator & Technical Project Lead handal. "
+                    "Kamu adalah AI Team Orchestrator & Technical Project Lead handal.\n"
                     "Tugasmu adalah menganalisis target tugas dari user, konteks arsitektur proyek (AGENTS.md), dan repositori skeleton, "
-                    "lalu menyusun tim kerja (pipeline) yang paling efisien dari katalog spesialis yang tersedia.\n\n"
+                    "lalu menyusun tim kerja (pipeline) yang paling efisien serta SCOPE MATRIX untuk membatasi ruang lingkup pengerjaan agar agen downstream tidak melebar atau merusak file yang tidak diminta.\n\n"
                     "KATALOG SPESIALIS YANG TERSEDIA:\n"
-                    "- 'Architect' (System Architect): Rancang arsitektur, skema DB/ERD, struktur modul. HANYA untuk fitur baru atau refactor besar.\n"
+                    "- 'Architect' (System Architect): Rancang arsitektur, skema DB/ERD, struktur modul. HANYA untuk fitur baru atau refactor besar. DILARANG jika tugas murni bugfix kecil atau styling UI!\n"
                     "- 'UI/UX' (UI/UX Specialist): Wireframe visual, user flow, component styling. HANYA jika tugas melibatkan tampilan visual / frontend UI. DILARANG diikutsertakan jika tugas murni backend, API, security audit, database, atau bugfix non-UI!\n"
                     "- 'Coder' (Lead Developer): Menulis/mengubah kode sumber multi-file produksi (### FILE:).\n"
                     "- 'Security' (Security Auditor): Khusus audit celah OWASP, SQLi, Auth, Token, Race Condition.\n"
@@ -420,21 +484,28 @@ PRESETS: Dict[str, Dict[str, Any]] = {
                     "- 'Researcher' (Pustaka & Riset): Konsep teori & literatur (khusus makalah/kuliah).\n"
                     "- 'Writer' (Penulis Makalah): Penulisan draf akademik (khusus makalah/kuliah).\n"
                     "- 'Reviewer' (Reviewer Akademik): Telaah naskah akademik (khusus makalah/kuliah).\n\n"
-                    "PANDUAN PEMILIHAN TIM:\n"
-                    "1. Pilih minimal 2 peran dan maksimal 4 peran yang BENAR-BENAR relevan.\n"
-                    "2. JANGAN PERNAH menyertakan 'UI/UX' jika tidak ada pembuatan atau modifikasi layar visual antarmuka pengguna!\n"
-                    "3. Jika tugas adalah Security Audit / Celah Keamanan / Bugfix: gunakan [Security, Coder, QA] atau [Coder, QA].\n"
-                    "4. Jika tugas adalah Fitur UI Mobile/Web lengkap: gunakan [Architect, UI/UX, Coder, QA].\n"
-                    "5. Jika tugas adalah Backend API / Database saja: gunakan [Architect, Coder, QA].\n"
-                    "6. Jika tugas akademik / kuliah: gunakan [Researcher, Writer, Reviewer].\n\n"
+                    "PANDUAN SCOPE MATRIX:\n"
+                    "1. Identifikasi file yang BOLEH diubah (allowed_files) dan file yang DILARANG disentuh (forbidden_files).\n"
+                    "   Contoh: Jika tugas 'perbaiki UI index.html', allowed_files=['index.html'], forbidden_files=['main.py', 'test_security.py'].\n"
+                    "2. Tentukan peran yang DIPILIH (selected_roles) dan peran yang DI-BYPASS / DILEWATI (bypassed_roles).\n"
+                    "3. Berikan instruksi batasan per-peran (role_boundaries) agar agen downstream tidak over-engineering.\n\n"
                     "FORMAT KELUARAN:\n"
-                    "Tuliskan analisis 1-2 paragraf mengenai strategi pengerjaan tugas, tim spesialis yang ditugaskan, dan peran yang sengaja DI-EXCLUDE (dilewati).\n"
+                    "Tuliskan analisis 1-2 paragraf mengenai strategi pengerjaan tugas, tim spesialis, dan Scope Matrix.\n"
                     "Di baris paling akhir, WAJIB sertakan blok JSON valid berikut:\n"
                     "```json\n"
                     "{\n"
-                    "  \"task_type\": \"SECURITY_AUDIT | FEATURE_DEV | BACKEND_API | BUGFIX | ACADEMIC\",\n"
-                    "  \"selected_roles\": [\"Role1\", \"Role2\", ...],\n"
-                    "  \"reasoning\": \"Penjelasan singkat mengapa tim ini yang dipilih\"\n"
+                    "  \"task_type\": \"SECURITY_AUDIT | FEATURE_DEV | BACKEND_API | FRONTEND_UI | BUGFIX | ACADEMIC\",\n"
+                    "  \"target_scope\": \"Deskripsi ruang lingkup yang diperbolehkan diubah\",\n"
+                    "  \"allowed_files\": [\"file1.ext\", \"file2.ext\"],\n"
+                    "  \"forbidden_files\": [\"file_a.ext\", \"file_b.ext\"],\n"
+                    "  \"selected_roles\": [\"Role1\", \"Role2\"],\n"
+                    "  \"bypassed_roles\": [\"RoleX\", \"RoleY\"],\n"
+                    "  \"role_boundaries\": {\n"
+                    "    \"Architect\": \"Bypass jika tidak ada perubahan skema/API\",\n"
+                    "    \"UI/UX\": \"Fokus komponen dan styling\",\n"
+                    "    \"Coder\": \"Hanya ubah file dalam allowed_files, dilarang sentuh forbidden_files dan dilarang buat stub dummy\"\n"
+                    "  },\n"
+                    "  \"reasoning\": \"Penjelasan singkat mengapa tim dan batasan ini yang dipilih\"\n"
                     "}\n"
                     "```"
                 )
@@ -545,6 +616,10 @@ PRESETS: Dict[str, Dict[str, Any]] = {
 }
 
 tasks_store: Dict[str, Dict[str, Any]] = {}
+WORKSTATION_SESSIONS_FILE = os.path.join(BASE_DIR, "sessions.json")
+workstation_sessions_store: Dict[str, Dict[str, Any]] = {}
+SNAPSHOTS_DIR = os.path.join(BASE_DIR, ".snapshots")
+os.makedirs(SNAPSHOTS_DIR, exist_ok=True)
 
 def load_tasks():
     global tasks_store
@@ -564,6 +639,51 @@ def save_tasks():
         print(f"Error saving tasks: {e}")
 
 load_tasks()
+
+def load_workstation_sessions():
+    global workstation_sessions_store
+    if os.path.exists(WORKSTATION_SESSIONS_FILE):
+        try:
+            with open(WORKSTATION_SESSIONS_FILE, "r", encoding="utf-8") as f:
+                workstation_sessions_store = json.load(f)
+        except Exception as e:
+            print(f"Error loading sessions: {e}")
+            workstation_sessions_store = {}
+    if not workstation_sessions_store:
+        s_id = "default"
+        workstation_sessions_store[s_id] = {
+            "id": s_id,
+            "title": "Default Project Session",
+            "created_at": time.time(),
+            "updated_at": time.time(),
+            "pinned": True,
+            "working_directory": "/home/andreadst/projects/ai-team-dashboard",
+            "task_ids": []
+        }
+        save_workstation_sessions()
+
+def save_workstation_sessions():
+    try:
+        with open(WORKSTATION_SESSIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(workstation_sessions_store, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"Error saving sessions: {e}")
+
+load_workstation_sessions()
+
+def save_apply_snapshot(wdir: str, task_id: str, records: List[Dict[str, Any]]):
+    try:
+        snap_file = os.path.join(SNAPSHOTS_DIR, "last_apply.json")
+        data = {
+            "timestamp": time.time(),
+            "working_directory": wdir,
+            "task_id": task_id,
+            "records": records
+        }
+        with open(snap_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"Error saving snapshot: {e}")
 
 def sanitize_path(path: str, base_dir: Optional[str] = None) -> str:
     path = os.path.abspath(path.strip())
@@ -616,40 +736,61 @@ def generate_repo_map(target_dir: str, max_files: int = 35) -> str:
     
     return "\n".join(lines)
 
-def extract_code_files(text: str) -> List[Dict[str, Any]]:
+def extract_code_files(text: str, scope_matrix: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     pattern = r'(?:###\s*FILE:|(?:\*\*|#)?FILE:(?:\*\*)?)\s*[`"]?([a-zA-Z0-9_\-\.\/\\]+)[`"]?\s*\n+```([a-zA-Z0-9_\-]+)?\n([\s\S]*?)```'
     matches = re.findall(pattern, text)
     files_map: Dict[str, Dict[str, Any]] = {}
+
+    forbidden_list = []
+    allowed_list = []
+    if scope_matrix:
+        forbidden_list = [f.lower().strip() for f in scope_matrix.get("forbidden_files", []) if f.strip()]
+        allowed_list = [f.lower().strip() for f in scope_matrix.get("allowed_files", []) if f.strip()]
+
     for m in matches:
         fpath = m[0].strip().replace('\\', '/').strip('/')
         lang = m[1].strip() or "text"
         code = m[2]
         if fpath:
+            is_blocked = False
+            blocked_reason = None
+            fpath_low = fpath.lower().strip()
+
+            if any(fb == fpath_low or fpath_low.endswith(fb) or fb in fpath_low for fb in forbidden_list):
+                is_blocked = True
+                blocked_reason = "File dilarang diubah oleh Scope Matrix (forbidden_files)"
+            elif allowed_list and not any(al == fpath_low or fpath_low.endswith(al) or al in fpath_low or al == "*" or al == "*.*" for al in allowed_list):
+                is_blocked = True
+                blocked_reason = "File di luar whitelist izin Scope Matrix (allowed_files)"
+
             # Match paling akhir menimpa match sebelumnya (hasil revisi auto-fix menang)
             files_map[fpath] = {
                 "path": fpath,
                 "language": lang,
                 "content": code,
-                "lines": len(code.strip().splitlines())
+                "lines": len(code.strip().splitlines()),
+                "blocked": is_blocked,
+                "blocked_reason": blocked_reason
             }
     return list(files_map.values())
 
 def get_git_info(target_dir: str) -> Dict[str, Any]:
     git_dir = os.path.join(target_dir, ".git")
     if not os.path.exists(git_dir):
-        return {"is_git": False, "branch": None, "clean": True}
+        return {"is_git": False, "branch": None, "clean": True, "status_lines": []}
     try:
         branch = subprocess.check_output(
             ["git", "-C", target_dir, "branch", "--show-current"],
             stderr=subprocess.DEVNULL
         ).decode().strip()
-        status = subprocess.check_output(
+        status_raw = subprocess.check_output(
             ["git", "-C", target_dir, "status", "--porcelain"],
             stderr=subprocess.DEVNULL
         ).decode().strip()
-        return {"is_git": True, "branch": branch or "HEAD", "clean": len(status) == 0}
+        status_lines = [s.strip() for s in status_raw.splitlines() if s.strip()]
+        return {"is_git": True, "branch": branch or "HEAD", "clean": len(status_lines) == 0, "status_lines": status_lines}
     except Exception:
-        return {"is_git": True, "branch": "unknown", "clean": True}
+        return {"is_git": True, "branch": "unknown", "clean": True, "status_lines": []}
 
 class StageConfig(BaseModel):
     role: str
@@ -663,6 +804,7 @@ class TaskCreateRequest(BaseModel):
     title: str
     prompt: str
     preset_id: Optional[str] = "auto"
+    session_id: Optional[str] = "default"
     stages: Optional[List[StageConfig]] = None
     working_directory: Optional[str] = None
     project_context: Optional[str] = None
@@ -806,6 +948,25 @@ async def execute_pipeline(task_id: str):
 
     context_chain += f"=== TARGET TUGAS / GOAL ===\n{task['prompt']}\n\n"
 
+    # Auto-inject previous session turn context if session exists
+    s_id = task.get("session_id")
+    if s_id and s_id in workstation_sessions_store:
+        prev_ids = [tid for tid in workstation_sessions_store[s_id].get("task_ids", []) if tid != task_id and tid in tasks_store]
+        if prev_ids:
+            for tid in reversed(prev_ids):
+                prev_t = tasks_store[tid]
+                if prev_t.get("status") == "completed" and prev_t.get("final_output"):
+                    prev_files = [f["path"] for f in prev_t.get("extracted_files", [])]
+                    context_chain += (
+                        f"=== PREVIOUS SESSION TURN CONTEXT (MULTI-TURN ITERATION) ===\n"
+                        f"- Sesi Proyek: {workstation_sessions_store[s_id].get('title', 'Project Session')}\n"
+                        f"- Tugas Sebelumnya: {prev_t.get('title', '')}\n"
+                        f"- Ringkasan Deliverable Sebelumnya:\n{prev_t['final_output'][:1500]}\n"
+                        f"- File yang Dihasilkan Sebelumnya: {', '.join(prev_files) or 'None'}\n"
+                        f"=== END OF PREVIOUS TURN ===\n\n"
+                    )
+                    break
+
     try:
         idx = 0
         while idx < len(task["stages"]):
@@ -814,12 +975,48 @@ async def execute_pipeline(task_id: str):
                 stage["status"] = "cancelled"
                 break
 
+            # Fast-bypass check (Orchestrator Stage 0 bypass)
+            if stage.get("status") == "bypassed":
+                idx += 1
+                continue
+
             stage["status"] = "running"
             stage["started_at"] = time.time()
             save_tasks()
 
+            boundary_note = ""
+            jobdesk_note = ""
+            if stage["role"] != "Orchestrator":
+                if task.get("scope_matrix"):
+                    sm = task["scope_matrix"]
+                    r_bound = sm.get("role_boundaries", {}).get(stage["role"], "")
+                    allowed = sm.get("allowed_files", [])
+                    forbidden = sm.get("forbidden_files", [])
+                    boundary_note = (
+                        f"\n=== SCOPE MATRIX ENFORCEMENT ===\n"
+                        f"- Target Scope: {sm.get('target_scope', 'Sesuai prompt')}\n"
+                        f"- File yang BOLEH diubah/dibuat: {', '.join(allowed) or 'File relevan'}\n"
+                        f"- File TERLARANG disentuh: {', '.join(forbidden) or 'None'}\n"
+                    )
+                    if r_bound:
+                        boundary_note += f"- Batasan Khusus Peranmu: {r_bound}\n"
+
+                jobdesk_note = (
+                    f"\n=== UNIVERSAL JOBDESK CONTRACT & RELEVANCE EVALUATION ===\n"
+                    f"Peranmu: [{stage['role']} - {stage['name']}].\n"
+                    f"Evaluasi sebelum bekerja:\n"
+                    f"1. Jika target tugas SEPENUHNYA DI LUAR DOMAINMU (contoh: peranmu UI/UX tapi tugas backend/API, atau peranmu Architect tapi tugas styling):\n"
+                    f"   DILARANG mengarang fitur atau file baru. Kamu WAJIB menjawab HANYA dengan 2 baris:\n"
+                    f"   STATUS: OUT_OF_SCOPE\n"
+                    f"   Alasan: [Jelaskan singkat 1 kalimat mengapa peranmu tidak dibutuhkan di tugas ini]\n"
+                    f"2. Jika tugas RELEVAN dengan peranmu:\n"
+                    f"   Lakukan tugasmu sesuai spesialisasi. Jangan melanggar batasan Scope Matrix di atas.\n"
+                )
+
             user_msg = (
                 f"{context_chain}\n"
+                f"{boundary_note}\n"
+                f"{jobdesk_note}\n"
                 f"Tugas kamu sekarang sebagai [{stage['role']} - {stage['name']}]:\n"
                 f"Lakukan tugas sesuai peran dan panduan spesialisasi yang diberikan."
             )
@@ -828,9 +1025,22 @@ async def execute_pipeline(task_id: str):
                 temp = stage.get("temperature", 0.2)
                 output = await call_llm(stage["system"], user_msg, temperature=temp)
                 stage["output"] = output
-                stage["status"] = "completed"
-                stage["completed_at"] = time.time()
-                context_chain += f"=== HASIL DARI [{stage['role']} - {stage['name']}] ===\n{output}\n\n"
+
+                output_clean = output.replace(" ", "").upper()
+                if stage["role"] != "Orchestrator" and ("STATUS:OUT_OF_SCOPE" in output_clean or "STATUS: OUT_OF_SCOPE" in output.upper()):
+                    stage["status"] = "bypassed"
+                    stage["completed_at"] = time.time()
+                    reason_line = ""
+                    for line in output.splitlines():
+                        if any(k in line.lower() for k in ["alasan", "reason", "out_of_scope"]):
+                            reason_line = line.strip()
+                            break
+                    # Context isolation: isolate from subsequent stages
+                    context_chain += f"=== [{stage['role']} - {stage['name']}] DILEWATI (OUT OF SCOPE) ===\n{reason_line or 'Tugas di luar domain peran ini.'}\n\n"
+                else:
+                    stage["status"] = "completed"
+                    stage["completed_at"] = time.time()
+                    context_chain += f"=== HASIL DARI [{stage['role']} - {stage['name']}] ===\n{output}\n\n"
             except Exception as e:
                 err_type = type(e).__name__
                 raw_err = str(e).strip()
@@ -860,10 +1070,40 @@ async def execute_pipeline(task_id: str):
 
             save_tasks()
 
-            # --- DYNAMIC ORCHESTRATION ---
-            # If current stage is Orchestrator, parse the execution plan and dynamically append worker stages
+            # --- DYNAMIC ORCHESTRATION & FAST-BYPASS ---
             if stage["role"] == "Orchestrator":
-                dynamic_stages = parse_orchestrator_plan(output)
+                dynamic_stages, scope_matrix = parse_orchestrator_plan(output)
+                if scope_matrix:
+                    task["scope_matrix"] = scope_matrix
+                    context_chain += (
+                        f"=== SCOPE MATRIX & EXECUTION BOUNDARIES (ENFORCED BY ORCHESTRATOR) ===\n"
+                        f"- Target Scope: {scope_matrix.get('target_scope', 'Sesuai prompt')}\n"
+                        f"- Allowed Files: {', '.join(scope_matrix.get('allowed_files', [])) or 'File relevan'}\n"
+                        f"- Forbidden Files: {', '.join(scope_matrix.get('forbidden_files', [])) or 'None'}\n"
+                    )
+                    if scope_matrix.get("role_boundaries"):
+                        context_chain += "- Role Boundaries:\n"
+                        for rb_k, rb_v in scope_matrix["role_boundaries"].items():
+                            context_chain += f"  * {rb_k}: {rb_v}\n"
+                    context_chain += "\n"
+
+                    bypassed_roles = [r.lower().strip() for r in scope_matrix.get("bypassed_roles", [])]
+                    selected_roles = [r.lower().strip() for r in scope_matrix.get("selected_roles", [])]
+
+                    # Fast-bypass existing pending stages (Stage 0 instant bypass 0s)
+                    for stg in task["stages"]:
+                        if stg["role"] != "Orchestrator" and stg.get("status") == "waiting":
+                            r_low = stg["role"].lower().strip()
+                            n_low = stg["name"].lower().strip()
+                            if any(b in r_low or b in n_low for b in bypassed_roles):
+                                stg["status"] = "bypassed"
+                                stg["output"] = f"STATUS: OUT_OF_SCOPE\nDilewati otomatis oleh Orchestrator (di luar target scope: {scope_matrix.get('target_scope', '')})."
+                                stg["completed_at"] = time.time()
+                            elif selected_roles and not any(sel in r_low or sel in n_low for sel in selected_roles):
+                                stg["status"] = "bypassed"
+                                stg["output"] = f"STATUS: OUT_OF_SCOPE\nDilewati otomatis oleh Orchestrator (peran tidak terpilih)."
+                                stg["completed_at"] = time.time()
+
                 if dynamic_stages:
                     for ds in dynamic_stages:
                         task["stages"].append(ds)
@@ -908,7 +1148,7 @@ async def execute_pipeline(task_id: str):
                         "name": f"Lead Developer (Auto-Fix Cycle #{task['current_fix_loop']})",
                         "icon": "🔧",
                         "temperature": 0.1,
-                        "system": "Kamu adalah Lead Full-Stack Developer. QA menemukan catatan perbaikan/bug pada kode sebelumnya. Analisis kritik QA, perbaiki implementasi secara presisi dan menyeluruh. Setiap file wajib ditulis dengan format `### FILE: path/to/file.ext`.",
+                        "system": "Kamu adalah Lead Full-Stack Developer. QA menemukan catatan perbaikan/bug pada kode sebelumnya. Analisis kritik QA, perbaiki implementasi secara presisi dan patuhi Scope Matrix. Setiap file wajib ditulis dengan format `### FILE: path/to/file.ext`.",
                         "status": "waiting",
                         "output": "",
                         "error": None
@@ -940,26 +1180,42 @@ async def execute_pipeline(task_id: str):
         task["completed_at"] = time.time()
         task["final_output"] = context_chain
 
-        # Extract multi-file blocks from entire conversation/coder outputs
-        extracted = extract_code_files(context_chain)
+        # Extract multi-file blocks with Scope Matrix validation
+        extracted = extract_code_files(context_chain, scope_matrix=task.get("scope_matrix"))
         task["extracted_files"] = extracted
 
-        # Auto-write files if requested and working directory is set
+        # Auto-write files if requested and working directory is set (with Scope Matrix enforcement & Snapshot)
         if task.get("auto_apply_files") and wdir and extracted:
             written_files = []
+            blocked_files = []
+            snapshot_records = []
             for item in extracted:
+                rel_p = item["path"]
+                if item.get("blocked"):
+                    blocked_files.append({"path": rel_p, "reason": item.get("blocked_reason")})
+                    continue
                 try:
-                    rel_p = item["path"]
                     full_p = sanitize_path(os.path.join(wdir, rel_p.lstrip("/")), base_dir=wdir)
                     os.makedirs(os.path.dirname(full_p), exist_ok=True)
-                    if os.path.exists(full_p):
-                        shutil.copy2(full_p, f"{full_p}.bak")
+                    existed = os.path.exists(full_p)
+                    backup_p = f"{full_p}.bak"
+                    if existed:
+                        shutil.copy2(full_p, backup_p)
                     with open(full_p, "w", encoding="utf-8") as fp:
                         fp.write(item["content"])
                     written_files.append(rel_p)
+                    snapshot_records.append({
+                        "target": full_p,
+                        "backup": backup_p,
+                        "existed": existed,
+                        "rel_path": rel_p
+                    })
                 except Exception as e:
                     print(f"Error applying file {item['path']}: {e}")
             task["applied_files"] = written_files
+            task["blocked_files"] = blocked_files
+            if snapshot_records:
+                save_apply_snapshot(wdir, task_id, snapshot_records)
 
         # Auto-save deliverable document if enabled
         if task.get("auto_save_artifact") and wdir:
@@ -1303,9 +1559,16 @@ async def create_task(req: TaskCreateRequest):
         "stages_approved": {},
         "final_output": "",
         "extracted_files": [],
+        "session_id": req.session_id or "default",
         "cancelled": False
     }
     tasks_store[task_id] = task
+    s_id = req.session_id or "default"
+    if s_id in workstation_sessions_store:
+        if task_id not in workstation_sessions_store[s_id].get("task_ids", []):
+            workstation_sessions_store[s_id].setdefault("task_ids", []).append(task_id)
+        workstation_sessions_store[s_id]["updated_at"] = time.time()
+        save_workstation_sessions()
     save_tasks()
 
     asyncio.create_task(execute_pipeline(task_id))
@@ -1359,25 +1622,294 @@ async def apply_task_files(task_id: str):
 
     files = task.get("extracted_files", [])
     if not files:
-        files = extract_code_files(task.get("final_output", ""))
+        files = extract_code_files(task.get("final_output", ""), scope_matrix=task.get("scope_matrix"))
 
     if not files:
         raise HTTPException(status_code=400, detail="Tidak ada blok file kode (### FILE: path) yang terdeteksi.")
 
     applied = []
+    blocked = []
+    snapshot_records = []
+
     for item in files:
         rel_p = item["path"]
-        full_p = sanitize_path(os.path.join(wdir, rel_p.lstrip("/")), base_dir=wdir)
-        os.makedirs(os.path.dirname(full_p), exist_ok=True)
-        if os.path.exists(full_p):
-            shutil.copy2(full_p, f"{full_p}.bak")
-        with open(full_p, "w", encoding="utf-8") as fp:
-            fp.write(item["content"])
-        applied.append({"path": rel_p, "lines": item["lines"]})
+        if item.get("blocked"):
+            blocked.append({"path": rel_p, "reason": item.get("blocked_reason", "Dilarang oleh Scope Matrix")})
+            continue
+
+        try:
+            full_p = sanitize_path(os.path.join(wdir, rel_p.lstrip("/")), base_dir=wdir)
+            os.makedirs(os.path.dirname(full_p), exist_ok=True)
+            existed = os.path.exists(full_p)
+            backup_p = f"{full_p}.bak"
+            if existed:
+                shutil.copy2(full_p, backup_p)
+            with open(full_p, "w", encoding="utf-8") as fp:
+                fp.write(item["content"])
+            applied.append({"path": rel_p, "lines": item["lines"]})
+            snapshot_records.append({
+                "target": full_p,
+                "backup": backup_p,
+                "existed": existed,
+                "rel_path": rel_p
+            })
+        except Exception as e:
+            print(f"Error applying file {item['path']}: {e}")
 
     task["applied_files"] = [a["path"] for a in applied]
+    task["blocked_files"] = blocked
+    if snapshot_records:
+        save_apply_snapshot(wdir, task_id, snapshot_records)
     save_tasks()
-    return {"status": "ok", "applied": applied, "count": len(applied)}
+    return {
+        "status": "ok",
+        "applied": applied,
+        "count": len(applied),
+        "blocked": blocked,
+        "blocked_count": len(blocked)
+    }
+
+class DiffRequest(BaseModel):
+    path: str
+    rel_path: str
+    new_content: str
+
+@app.post("/api/workspace/diff")
+async def compute_workspace_diff(req: DiffRequest):
+    wdir = sanitize_path(req.path)
+    full_path = sanitize_path(os.path.join(wdir, req.rel_path.lstrip("/")), base_dir=wdir)
+
+    old_content = ""
+    exists = os.path.exists(full_path)
+    if exists:
+        try:
+            with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                old_content = f.read()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Gagal membaca file asli: {e}")
+
+    old_lines = old_content.splitlines(keepends=True)
+    new_lines = req.new_content.splitlines(keepends=True)
+
+    diff = list(difflib.unified_diff(
+        old_lines,
+        new_lines,
+        fromfile=f"a/{req.rel_path}",
+        tofile=f"b/{req.rel_path}",
+        lineterm=""
+    ))
+
+    parsed_lines = []
+    additions = 0
+    deletions = 0
+    for line in diff:
+        line_clean = line.rstrip("\r\n")
+        if line_clean.startswith("+++") or line_clean.startswith("---"):
+            parsed_lines.append({"type": "header", "text": line_clean})
+        elif line_clean.startswith("@@"):
+            parsed_lines.append({"type": "chunk", "text": line_clean})
+        elif line_clean.startswith("+"):
+            additions += 1
+            parsed_lines.append({"type": "add", "text": line_clean[1:]})
+        elif line_clean.startswith("-"):
+            deletions += 1
+            parsed_lines.append({"type": "del", "text": line_clean[1:]})
+        else:
+            txt = line_clean[1:] if line_clean.startswith(" ") else line_clean
+            parsed_lines.append({"type": "ctx", "text": txt})
+
+    return {
+        "rel_path": req.rel_path,
+        "exists": exists,
+        "additions": additions,
+        "deletions": deletions,
+        "diff_lines": parsed_lines
+    }
+
+class CheckSyntaxRequest(BaseModel):
+    rel_path: str
+    content: str
+
+@app.post("/api/workspace/check-syntax")
+async def check_syntax(req: CheckSyntaxRequest):
+    ext = os.path.splitext(req.rel_path)[1].lower()
+    content = req.content
+
+    if ext == ".py":
+        try:
+            compile(content, req.rel_path, "exec")
+            return {
+                "valid": True,
+                "language": "python",
+                "message": "Sintaks Python valid (bebas SyntaxError)."
+            }
+        except SyntaxError as e:
+            return {
+                "valid": False,
+                "language": "python",
+                "line": e.lineno,
+                "col": e.offset,
+                "message": f"SyntaxError di baris {e.lineno}: {e.msg}"
+            }
+        except Exception as e:
+            return {
+                "valid": False,
+                "language": "python",
+                "message": f"CompileError: {str(e)}"
+            }
+    elif ext == ".json":
+        try:
+            json.loads(content)
+            return {
+                "valid": True,
+                "language": "json",
+                "message": "Format JSON valid."
+            }
+        except json.JSONDecodeError as e:
+            return {
+                "valid": False,
+                "language": "json",
+                "line": e.lineno,
+                "col": e.colno,
+                "message": f"JSONDecodeError di baris {e.lineno}, kolom {e.colno}: {e.msg}"
+            }
+    elif ext in [".yaml", ".yml"]:
+        try:
+            yaml.safe_load(content)
+            return {
+                "valid": True,
+                "language": "yaml",
+                "message": "Format YAML valid."
+            }
+        except Exception as e:
+            return {
+                "valid": False,
+                "language": "yaml",
+                "message": f"YAMLError: {str(e)[:150]}"
+            }
+    else:
+        # Check matching brackets for JS/TS/Dart/HTML
+        stack = []
+        pairs = {')': '(', '}': '{', ']': '['}
+        line_no = 1
+        for idx_ch, ch in enumerate(content):
+            if ch == '\n':
+                line_no += 1
+            elif ch in "({[":
+                stack.append((ch, line_no))
+            elif ch in ")}]":
+                if not stack or stack[-1][0] != pairs[ch]:
+                    return {
+                        "valid": False,
+                        "language": ext.lstrip(".") or "code",
+                        "line": line_no,
+                        "message": f"Mismatched bracket '{ch}' di baris {line_no}."
+                    }
+                stack.pop()
+        if stack:
+            unclosed, uline = stack[-1]
+            return {
+                "valid": False,
+                "language": ext.lstrip(".") or "code",
+                "line": uline,
+                "message": f"Unclosed bracket '{unclosed}' di baris {uline}."
+            }
+        return {
+            "valid": True,
+            "language": ext.lstrip(".") or "code",
+            "message": "Struktur kurung dan blok seimbang."
+        }
+
+class RollbackRequest(BaseModel):
+    path: Optional[str] = None
+
+@app.post("/api/workspace/rollback")
+async def rollback_last_apply(req: RollbackRequest):
+    snap_file = os.path.join(SNAPSHOTS_DIR, "last_apply.json")
+    if not os.path.exists(snap_file):
+        raise HTTPException(status_code=400, detail="Tidak ada snapshot perubahan terakhir untuk di-rollback.")
+    try:
+        with open(snap_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gagal membaca snapshot: {e}")
+
+    restored = []
+    errors = []
+    for rec in data.get("records", []):
+        target = rec["target"]
+        backup = rec.get("backup")
+        existed = rec.get("existed", True)
+        rel_path = rec.get("rel_path", os.path.basename(target))
+        try:
+            if existed and backup and os.path.exists(backup):
+                shutil.copy2(backup, target)
+                restored.append({"path": rel_path, "action": "restored_from_backup"})
+            elif not existed and os.path.exists(target):
+                os.remove(target)
+                restored.append({"path": rel_path, "action": "removed_new_file"})
+        except Exception as err:
+            errors.append({"path": rel_path, "error": str(err)})
+
+    return {
+        "status": "ok",
+        "restored": restored,
+        "restored_count": len(restored),
+        "errors": errors,
+        "task_id": data.get("task_id")
+    }
+
+class SessionCreateRequest(BaseModel):
+    title: str
+    working_directory: Optional[str] = None
+
+class SessionUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    pinned: Optional[bool] = None
+
+@app.get("/api/workstation/sessions")
+def get_workstation_sessions():
+    s_list = list(workstation_sessions_store.values())
+    s_list.sort(key=lambda s: (not s.get("pinned", False), -s.get("updated_at", 0)))
+    return {"sessions": s_list}
+
+@app.post("/api/workstation/sessions")
+def create_workstation_session(req: SessionCreateRequest):
+    s_id = str(uuid.uuid4())[:8]
+    session_data = {
+        "id": s_id,
+        "title": req.title.strip() or f"Session {s_id}",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "pinned": False,
+        "working_directory": req.working_directory or "/home/andreadst/projects/ai-team-dashboard",
+        "task_ids": []
+    }
+    workstation_sessions_store[s_id] = session_data
+    save_workstation_sessions()
+    return session_data
+
+@app.patch("/api/workstation/sessions/{session_id}")
+def update_workstation_session(session_id: str, req: SessionUpdateRequest):
+    s = workstation_sessions_store.get(session_id)
+    if not s:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if req.title is not None:
+        s["title"] = req.title.strip()
+    if req.pinned is not None:
+        s["pinned"] = req.pinned
+    s["updated_at"] = time.time()
+    save_workstation_sessions()
+    return s
+
+@app.delete("/api/workstation/sessions/{session_id}")
+def delete_workstation_session(session_id: str):
+    if session_id == "default":
+        raise HTTPException(status_code=400, detail="Sesi default tidak dapat dihapus.")
+    if session_id in workstation_sessions_store:
+        del workstation_sessions_store[session_id]
+        save_workstation_sessions()
+    return {"status": "ok", "session_id": session_id}
 
 @app.post("/api/tasks/{task_id}/cancel")
 async def cancel_task(task_id: str):
