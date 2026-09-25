@@ -24,6 +24,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -755,7 +756,7 @@ def get_git_info(target_dir: str) -> Dict[str, Any]:
         status_lines = [s.strip() for s in status_raw.splitlines() if s.strip()]
         return {"is_git": True, "branch": branch or "HEAD", "clean": len(status_lines) == 0, "status_lines": status_lines}
     except Exception:
-        return {"is_git": True, "branch": "unknown", "clean": True, "status_lines": []}
+        return {"is_git": False, "branch": None, "clean": True, "status_lines": []}
 
 class StageConfig(BaseModel):
     role: str
@@ -1983,7 +1984,7 @@ def _clean_terminal_env() -> Dict[str, str]:
         "DATABASE_URL", "SECRET_KEY"
     }
     for k in list(clean.keys()):
-        if k in sensitive_keys or any(sub in k.upper() for sub in ("AUTH_TOKEN", "SECRET_KEY", "PRIVATE_KEY")):
+        if k in sensitive_keys or any(sub in k.upper() for sub in ("AUTH_TOKEN", "SECRET_KEY", "PRIVATE_KEY", "API_KEY", "PASSWORD", "CREDENTIAL")):
             del clean[k]
     return clean
 
@@ -2006,9 +2007,14 @@ def _mask_sensitive_text(text: str) -> str:
     for sec in configured_secrets:
         masked = masked.replace(sec, "[REDACTED_SECRET]")
 
-    # Mask key=value assignments: AI_TEAM_AUTH_TOKEN=..., LLM_API_KEY=..., etc.
-    masked = re.sub(r'(AI_TEAM_AUTH_TOKEN=)[^\s&|;]+', r'\1[REDACTED_SECRET]', masked)
-    masked = re.sub(r'([A-Z0-9_]*(?:KEY|TOKEN|SECRET)[A-Z0-9_]*=)[^\s&|;]+', r'\1[REDACTED_SECRET]', masked)
+    # Mask key=value assignments: AI_TEAM_AUTH_TOKEN=..., LLM_API_KEY=..., etc. without catastrophic regex backtracking
+    if "=" in masked:
+        def _redact_env(m):
+            k = m.group(1)
+            if any(sub in k.upper() for sub in ("KEY", "TOKEN", "SECRET", "PASS", "CREDENTIAL")):
+                return f"{k}=[REDACTED_SECRET]"
+            return m.group(0)
+        masked = re.sub(r'\b([A-Za-z0-9_]{1,64})=([^\s&|;]+)', _redact_env, masked)
 
     # Mask standard API key / token formats: sk-..., Bearer ..., gh[pousr]-...
     masked = re.sub(r'sk-[a-zA-Z0-9_-]{20,}', '[REDACTED_API_KEY]', masked)
@@ -2071,7 +2077,7 @@ async def execute_workspace_terminal(req: TerminalExecuteRequest):
 
     # 2. Timeout and output size limits
     timeout_sec = min(max(int(req.timeout or 30), 1), 120)
-    max_output_chars = 100_000
+    max_output_chars = int(os.environ.get("TERMINAL_MAX_OUTPUT", 100_000))
 
     start_t = time.time()
     try:
@@ -2346,9 +2352,13 @@ async def check_syntax(req: CheckSyntaxRequest):
         # Use real node -c verification with fallback to known NVM node paths
         node_bin = os.environ.get("NODE_BIN") or shutil.which("node")
         if not node_bin:
-            # newest installed nvm node, no machine-specific version pinned
-            nvm_pattern = os.path.join(os.path.expanduser("~"), ".nvm", "versions", "node", "*", "bin", "node")
-            candidates = sorted(glob.glob(nvm_pattern))
+            # Check NVM paths on POSIX and Windows
+            if IS_WINDOWS:
+                nvm_home = os.environ.get("NVM_HOME") or os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "nvm")
+                candidates = sorted(glob.glob(os.path.join(nvm_home, "v*", "node.exe"))) or glob.glob(os.path.join(nvm_home, "node.exe"))
+            else:
+                nvm_pattern = os.path.join(os.path.expanduser("~"), ".nvm", "versions", "node", "*", "bin", "node")
+                candidates = sorted(glob.glob(nvm_pattern))
             if candidates:
                 node_bin = candidates[-1]
         if node_bin:
@@ -2636,6 +2646,12 @@ async def serve_index():
         with open(index_path, "r", encoding="utf-8") as f:
             return f.read()
     return "<h1>AI Team Dashboard is initializing...</h1>"
+
+
+# Mount static assets directory for modular frontend components
+static_dir = os.path.join(BASE_DIR, "static")
+if os.path.exists(static_dir):
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 
 # ============================================================================

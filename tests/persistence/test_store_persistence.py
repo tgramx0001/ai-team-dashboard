@@ -21,9 +21,9 @@ class TestPhase2Verification(unittest.TestCase):
         store.init_db()
 
     def test_browser_uses_fetch_not_eventsource(self):
-        """Verify frontend scripts use fetch + ReadableStream, NOT native EventSource (which is GET-only)."""
-        chat_script = os.path.join(os.path.dirname(__file__), "static", "js", "chat.js")
-        with open(chat_script, "r", encoding="utf-8") as f:
+        """Verify chat JS uses fetch + ReadableStream, NOT native EventSource (which is GET-only)."""
+        chat_js_path = os.path.join(main.BASE_DIR, "static", "js", "chat.js")
+        with open(chat_js_path, "r", encoding="utf-8") as f:
             content = f.read()
 
         # Chat send block must use fetch with POST
@@ -62,7 +62,7 @@ class TestPhase2Verification(unittest.TestCase):
 
     def test_workspace_and_skills_context_injection(self):
         """Verify _build_chat_system_prompt injects workspace repo map, rules, and skills."""
-        here = os.path.dirname(os.path.abspath(__file__))
+        here = main.BASE_DIR
         prompt = _build_chat_system_prompt(workspace_root=here, skills=["vibe-coding"])
 
         # Must include identity
