@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 
 SCHEMA_VERSION = 3
 
-_db_initialized = False
+_initialized_dbs = set()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 JSON_BACKUP_PATH = os.path.join(BASE_DIR, "tasks.json")  # JSON_BACKUP: temporary migration backup
@@ -188,12 +188,12 @@ CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id
 """
 
 
-def init_db() -> int:
-    """Create/upgrade schema. Returns schema version. Guarded to run once per process."""
-    global _db_initialized
-    if _db_initialized:
+def init_db(force: bool = False) -> int:
+    """Create/upgrade schema. Returns schema version. Guarded per database path."""
+    current_path = os.path.abspath(db_path())
+    if not force and current_path in _initialized_dbs:
         return SCHEMA_VERSION
-    os.makedirs(os.path.dirname(db_path()) or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(current_path) or ".", exist_ok=True)
     conn = connect()
     try:
         conn.executescript(SCHEMA_SQL)
@@ -212,7 +212,7 @@ def init_db() -> int:
                 (str(time.time()),),
             )
         conn.commit()
-        _db_initialized = True
+        _initialized_dbs.add(current_path)
         return SCHEMA_VERSION
     finally:
         conn.close()

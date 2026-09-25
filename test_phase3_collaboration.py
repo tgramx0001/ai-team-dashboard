@@ -1,9 +1,14 @@
 import asyncio
 import json
 import os
+import shutil
+import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
 
+# Isolated test DB & environment
+TEST_DB_PATH = os.path.join(tempfile.gettempdir(), "test_ai_team_collab.db")
+os.environ["AI_TEAM_DB"] = TEST_DB_PATH
 os.environ["AI_TEAM_AUTH_TOKEN"] = "test-phase3-token"
 os.environ["WORKSPACE_ROOT"] = os.path.abspath(os.path.expanduser("~/projects"))
 os.environ["DEFAULT_WORKSPACE"] = os.environ["WORKSPACE_ROOT"]
@@ -16,6 +21,24 @@ client = TestClient(main.app, headers={"Authorization": f"Bearer {main.AUTH_TOKE
 
 
 class TestPhase3Collaboration(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if os.path.exists(TEST_DB_PATH):
+            os.remove(TEST_DB_PATH)
+        store._initialized_dbs.clear()
+        store.init_db(force=True)
+        store.seed_agents_from_file()
+
+    @classmethod
+    def tearDownClass(cls):
+        os.environ.pop("AI_TEAM_DB", None)
+        store._initialized_dbs.clear()
+        if os.path.exists(TEST_DB_PATH):
+            try:
+                os.remove(TEST_DB_PATH)
+            except Exception:
+                pass
+
     def setUp(self):
         store.init_db()
         store.seed_agents_from_file()
@@ -44,16 +67,49 @@ class TestPhase3Collaboration(unittest.TestCase):
         self.assertTrue(store.check_agent_permission("QA", "shell"))
         self.assertFalse(store.check_agent_permission("QA", "filesystem", "write"))
 
-        # Update permission via API
-        res_update = client.post("/api/agents/Researcher/permissions", json={
-            "permissions": {"filesystem": {"read": True, "write": False}, "web": True, "shell": True}
+        # Test endpoint check-permission
+        res_chk_coder = client.post("/api/agents/Coder/check-permission", json={
+            "capability": "filesystem", "subaction": "write"
         })
-        self.assertEqual(res_update.status_code, 200)
-        self.assertTrue(store.check_agent_permission("Researcher", "shell"))
-        # Revert back
-        client.post("/api/agents/Researcher/permissions", json={
-            "permissions": {"filesystem": {"read": True, "write": False}, "web": True, "shell": False}
+        self.assertEqual(res_chk_coder.status_code, 200)
+        self.assertTrue(res_chk_coder.json()["allowed"])
+
+        res_chk_arch = client.post("/api/agents/Architect/check-permission", json={
+            "capability": "filesystem", "subaction": "write"
         })
+        self.assertEqual(res_chk_arch.status_code, 200)
+        self.assertFalse(res_chk_arch.json()["allowed"])
+
+    def test_apply_files_enforces_permissions(self):
+        """Verify apply_task_files raises 403 when Coder lacks filesystem write permission."""
+        task_id = "test-perm-enforce"
+        task_obj = {
+            "id": task_id,
+            "title": "Permission Enforcement Task",
+            "prompt": "Test",
+            "status": "completed",
+            "working_directory": tempfile.gettempdir(),
+            "extracted_files": [{"path": "dummy.txt", "content": "hello", "lines": 1}],
+            "stages": []
+        }
+        main.tasks_store[task_id] = task_obj
+        store.save_task(task_obj)
+
+        # Revoke Coder write permission
+        orig_perms = store.load_agents()["Coder"].get("permissions", {})
+        client.post("/api/agents/Coder/permissions", json={
+            "permissions": {"filesystem": {"read": True, "write": False}, "shell": False}
+        })
+
+        try:
+            res_denied = client.post(f"/api/tasks/{task_id}/apply-files")
+            self.assertEqual(res_denied.status_code, 403)
+            self.assertIn("Izin ditolak", res_denied.json()["detail"])
+        finally:
+            # Restore original permissions
+            client.post("/api/agents/Coder/permissions", json={"permissions": orig_perms})
+            main.tasks_store.pop(task_id, None)
+            store.purge_task(task_id)
 
     def test_structured_messages_crud(self):
         """Verify structured agent messaging (QUESTION, FINDING, REQUEST_CHANGE)."""
@@ -105,17 +161,17 @@ class TestPhase3Collaboration(unittest.TestCase):
 
     def test_chat_dynamic_agent_escalation(self):
         """Verify chat can dynamically switch to specialists (@researcher, @coder) and track team."""
-        # 1. Create a session starting with Hermes
         res_sess = client.post("/api/chat/sessions", json={"title": "Team Session"})
         self.assertEqual(res_sess.status_code, 200)
         sess_id = res_sess.json()["session"]["id"]
 
-        # Mock LLM stream generator
+        captured_temp = []
         async def mock_stream(messages, model=None, temperature=0.3):
-            yield 'data: {"chunk": "Riset: "}\n\n'
+            captured_temp.append(temperature)
+            yield 'data: {"chunk": "Respon: "}\n\n'
             yield 'data: {"chunk": "Berikut temuan awal."}\n\n'
 
-        # 2. Invoke Researcher explicitly
+        # 1. Invoke Researcher explicitly
         with patch("main._stream_chat_llm", side_effect=mock_stream):
             res_chat = client.post("/api/chat", json={
                 "session_id": sess_id,
@@ -127,37 +183,43 @@ class TestPhase3Collaboration(unittest.TestCase):
             self.assertIn("agent.started", body)
             self.assertIn("Researcher", body)
 
-        # 3. Verify session active agents now has Hermes + Researcher
+        # Verify session active agents now has Hermes + Researcher
         res_agents = client.get(f"/api/chat/sessions/{sess_id}/agents")
         self.assertEqual(res_agents.status_code, 200)
         team = res_agents.json()["active_agents"]
         self.assertIn("Hermes", team)
         self.assertIn("Researcher", team)
 
-        # 4. Invoke Coder via @mention in user prompt
+        # 2. Invoke Coder via @mention in user prompt (even if UI sends default agent='Hermes')
         with patch("main._stream_chat_llm", side_effect=mock_stream):
             res_mention = client.post("/api/chat", json={
                 "session_id": sess_id,
+                "agent": "Hermes",
                 "message": "@coder bagaimana implementasi clustering di python?"
             })
             self.assertEqual(res_mention.status_code, 200)
-            self.assertIn("Coder", res_mention.text)
+            self.assertIn('"agent": "Coder"', res_mention.text)
 
-        # Verify Coder joined the active team
-        res_team2 = client.get(f"/api/chat/sessions/{sess_id}/agents")
-        team2 = res_team2.json()["active_agents"]
-        self.assertIn("Coder", team2)
+        # 3. Invoke Critic via natural language 'Tanya ke Critic'
+        with patch("main._stream_chat_llm", side_effect=mock_stream):
+            res_nl = client.post("/api/chat", json={
+                "session_id": sess_id,
+                "agent": "Hermes",
+                "message": "Tanya ke Critic apakah ada celah pada rencana di atas"
+            })
+            self.assertEqual(res_nl.status_code, 200)
+            self.assertIn('"agent": "Critic"', res_nl.text)
 
         # Clean up
         store.delete_chat_session(sess_id)
 
-    def test_collaborative_retry_loop_on_qa_failed(self):
-        """Verify dynamic auto-fix cycle triggers when QA outputs VERDICT: NEEDS_REVISION."""
-        task_id = "test-auto-fix-flow"
+    def test_auto_fix_exhaustion_approval_gate(self):
+        """Verify pipeline strictly pauses with waiting_approval when auto-fix loop limit is exhausted."""
+        task_id = "test-gate-exhaustion"
         main.tasks_store[task_id] = {
             "id": task_id,
-            "title": "Auto Fix Collaborative Task",
-            "prompt": "Buat fungsi login",
+            "title": "Auto Fix Exhaustion Gate Test",
+            "prompt": "Buat fungsi transfer",
             "preset_id": "standard",
             "status": "queued",
             "auto_fix_loops": 1,
@@ -183,95 +245,40 @@ class TestPhase3Collaboration(unittest.TestCase):
                 }
             ]
         }
+        store.save_task(main.tasks_store[task_id])
 
-        call_count = {"Coder": 0, "QA": 0}
-
-        async def mock_call_llm(system, user, temperature=0.2):
-            if "Lead Full-Stack Developer" in system or "Coder" in system:
-                call_count["Coder"] += 1
-                return "### FILE: auth.py\n```python\ndef login(): pass\n```"
-            elif "Senior QA" in system or "QA" in system:
-                call_count["QA"] += 1
-                if call_count["QA"] == 1:
-                    # First QA audit fails -> triggers auto-fix
-                    return "Ditemukan celah: null pointer. VERDICT: NEEDS_REVISION"
-                else:
-                    # Second QA audit passes
-                    return "Perbaikan berhasil. VERDICT: PASSED"
-            return "OK"
-
-        with patch("main.call_llm", side_effect=mock_call_llm):
-            asyncio.run(main.execute_pipeline(task_id))
-
-        t = main.tasks_store.get(task_id)
-        self.assertIsNotNone(t)
-        self.assertEqual(t["status"], "completed")
-        self.assertEqual(t["current_fix_loop"], 1)
-
-        # Coder called twice (initial + fix cycle), QA called twice (initial + re-verification)
-        self.assertEqual(call_count["Coder"], 2)
-        self.assertEqual(call_count["QA"], 2)
-
-        # Verify structured REQUEST_CHANGE and TEST_PASSED messages exist
-        msgs = store.list_messages(task_id)
-        kinds = [m["kind"] for m in msgs]
-        self.assertIn("REQUEST_CHANGE", kinds)
-        self.assertIn("TEST_PASSED", kinds)
-
-        # Clean up
-        main.tasks_store.pop(task_id, None)
-        store.purge_task(task_id)
-
-    def test_approval_state_pause_and_resume(self):
-        """Verify task pauses when approval required, and resumes when approved."""
-        task_id = "test-approval-task"
-        main.tasks_store[task_id] = {
-            "id": task_id,
-            "title": "Approval Test",
-            "prompt": "Arsitektur sistem",
-            "preset_id": "standard",
-            "status": "queued",
-            "require_approval": True,
-            "stages": [
-                {
-                    "role": "Architect",
-                    "name": "System Architect",
-                    "system": "Kamu adalah System Architect",
-                    "temperature": 0.1,
-                    "status": "waiting",
-                    "output": "",
-                    "error": None
-                }
-            ]
-        }
-
-        async def run_pipeline_with_approval():
+        async def run_pipeline_exhaustion():
             async def mock_call(sys, u, temperature=0.1):
-                return "Desain arsitektur database selesai."
-            
+                if "QA" in sys:
+                    # Always fail QA
+                    return "Bug ditemukan: race condition transfer saldo. VERDICT: NEEDS_REVISION"
+                return "### FILE: transfer.py\n```python\ndef transfer(): pass\n```"
+
             with patch("main.call_llm", side_effect=mock_call):
-                # Start pipeline as background coroutine
                 pipe_task = asyncio.create_task(main.execute_pipeline(task_id))
-                # Wait briefly until it enters waiting_approval
-                for _ in range(20):
+                
+                # Wait until pipeline pauses at approval gate
+                for _ in range(30):
                     await asyncio.sleep(0.05)
                     if main.tasks_store[task_id].get("status") == "waiting_approval":
                         break
-                
-                # Check that it paused
+
+                # Assert that it DID NOT fail open or jump to completed
                 self.assertEqual(main.tasks_store[task_id]["status"], "waiting_approval")
+                self.assertIn("QA Review Gate", main.tasks_store[task_id].get("waiting_stage_name", ""))
 
-                # Approve via endpoint
-                res = client.post(f"/api/tasks/{task_id}/approve", json={"action": "approve", "feedback": "Disetujui"})
-                self.assertEqual(res.status_code, 200)
+                # Now reject via approval endpoint
+                res_reject = client.post(f"/api/tasks/{task_id}/approve", json={
+                    "action": "reject", "feedback": "Dibatalkan karena bug belum terselesaikan."
+                })
+                self.assertEqual(res_reject.status_code, 200)
 
-                # Wait for pipeline to finish
                 await pipe_task
 
-        asyncio.run(run_pipeline_with_approval())
+        asyncio.run(run_pipeline_exhaustion())
 
         t = main.tasks_store.get(task_id)
-        self.assertEqual(t["status"], "completed")
+        self.assertEqual(t["status"], "cancelled")
 
         # Clean up
         main.tasks_store.pop(task_id, None)

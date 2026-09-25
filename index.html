@@ -3665,6 +3665,8 @@
                   currentAgent = evt.agent;
                   currentIcon = evt.icon || AGENT_ICONS[evt.agent] || '🤖';
                   document.getElementById('chatStreamStatus').textContent = currentIcon + ' ' + currentAgent + ' sedang berpikir…';
+                  const sel = document.getElementById('chatTargetAgent');
+                  if (sel && sel.querySelector(`option[value="${evt.agent}"]`)) sel.value = evt.agent;
                 } else if (evt.chunk) {
                   accumulated += evt.chunk;
                   const header = `<div class="text-[10px] text-brand-light mb-1 flex items-center gap-1 font-mono font-semibold select-none"><span>${currentIcon}</span><span>${escapeHtml(currentAgent)}</span></div>`;

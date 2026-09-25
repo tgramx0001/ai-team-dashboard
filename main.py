@@ -1030,13 +1030,18 @@ async def execute_pipeline(task_id: str):
                     f"   Lakukan tugasmu sesuai spesialisasi. Jangan melanggar batasan Scope Matrix di atas.\n"
                 )
 
-            # Pull inbox of structured messages directed to this role
+            # Pull inbox of structured messages directed to this role (exclude raw stage outputs already in ctx.render())
             pending_msgs = store.list_messages(task_id, to_role=stage["role"])
+            structured_kinds = {"QUESTION", "ANSWER", "FINDING", "REQUEST_CHANGE", "ARCHITECTURE_CONCERN", "TEST_FAILED", "TEST_PASSED", "APPROVAL_REQUIRED", "APPROVED", "REJECTED", "BLOCKED"}
+            collab_msgs = [m for m in pending_msgs if m.get("kind") in structured_kinds]
             inbox_note = ""
-            if pending_msgs:
-                inbox_lines = [f"\n=== PESAN & PERMINTAAN DARI REKAN TIM UNTUK [{stage['role']}] ==="]
-                for pm in pending_msgs[-4:]:
-                    inbox_lines.append(f"- Dari {pm.get('role')} [{pm.get('kind')}]: {pm.get('content')}")
+            if collab_msgs:
+                inbox_lines = [f"\n=== PESAN & DIRECTIVE DARI REKAN TIM UNTUK [{stage['role']}] ==="]
+                for pm in collab_msgs[-4:]:
+                    snippet = (pm.get('content') or '').strip()
+                    if len(snippet) > 400:
+                        snippet = snippet[:400] + "..."
+                    inbox_lines.append(f"- Dari {pm.get('role')} [{pm.get('kind')}]: {snippet}")
                 inbox_note = "\n".join(inbox_lines) + "\n"
 
             user_msg = (
@@ -1080,13 +1085,13 @@ async def execute_pipeline(task_id: str):
 
                     # Extract structured collaborative signals: FINDING, QUESTION, ARCHITECTURE_CONCERN
                     if re.search(r'(?:FINDING|TEMUAN):', output, re.IGNORECASE):
-                        fm = re.search(r'(?:FINDING|TEMUAN):\s*(.+)', output, re.IGNORECASE)
+                        fm = re.search(r'(?:FINDING|TEMUAN):\s*(.*?)(?=\n\s*(?:###|[A-Z_]{3,}:)|$)', output, re.IGNORECASE | re.DOTALL)
                         ftxt = fm.group(1).strip() if fm else output[:120]
                         store.add_message(task_id, stage["role"], "FINDING", ftxt, stage_idx=idx, to_role="all")
                         store.add_event(task_id, "agent.finding", {"role": stage["role"], "finding": ftxt})
 
-                    if re.search(r'(?:QUESTION|TANYA)\s*(?:KE|TO)?', output, re.IGNORECASE):
-                        qm = re.search(r'(?:QUESTION|TANYA)\s*(?:(?:KE|TO)\s+([a-zA-Z0-9_\-]+))?:\s*(.+)', output, re.IGNORECASE)
+                    if re.search(r'(?:QUESTION|TANYA)', output, re.IGNORECASE):
+                        qm = re.search(r'(?:QUESTION|TANYA)(?:\s+(?:KE|TO))?\s*([a-zA-Z0-9_\-]+)?:\s*(.*?)(?=\n\s*(?:###|[A-Z_]{3,}:)|$)', output, re.IGNORECASE | re.DOTALL)
                         if qm:
                             q_target = qm.group(1) or "all"
                             q_txt = qm.group(2).strip()
@@ -1094,7 +1099,7 @@ async def execute_pipeline(task_id: str):
                             store.add_event(task_id, "agent.question", {"from": stage["role"], "to": q_target, "question": q_txt})
 
                     if "ARCHITECTURE_CONCERN:" in output or "ARCHITECTURE CONCERN:" in output:
-                        acm = re.search(r'ARCHITECTURE_?CONCERN:\s*(.+)', output, re.IGNORECASE)
+                        acm = re.search(r'ARCHITECTURE_?CONCERN:\s*(.*?)(?=\n\s*(?:###|[A-Z_]{3,}:)|$)', output, re.IGNORECASE | re.DOTALL)
                         actxt = acm.group(1).strip() if acm else "Perhatian terhadap konsistensi arsitektur."
                         store.add_message(task_id, stage["role"], "ARCHITECTURE_CONCERN", actxt, stage_idx=idx, to_role="Architect")
                         store.add_event(task_id, "agent.message", {"type": "ARCHITECTURE_CONCERN", "from": stage["role"], "to": "Architect", "summary": actxt})
@@ -1269,7 +1274,7 @@ async def execute_pipeline(task_id: str):
                         save_single_task(task_id)
                         store.add_event(task_id, "task.auto_fix", {"cycle": task["current_fix_loop"]})
                     else:
-                        # Max loops reached: pause and ask human approval
+                        # Max loops reached: pause and wait for human supervisor decision
                         task["status"] = "waiting_approval"
                         task["waiting_stage_index"] = idx
                         task["waiting_stage_name"] = f"QA Review Gate (Maks. Perbaikan #{max_loops}x)"
@@ -1280,6 +1285,24 @@ async def execute_pipeline(task_id: str):
                             stage_idx=idx, to_role="user"
                         )
                         store.add_event(task_id, "approval.requested", {"index": idx, "reason": "auto_fix_exhausted"})
+
+                        event = asyncio.Event()
+                        APPROVAL_EVENTS[task_id] = event
+                        await event.wait()
+                        APPROVAL_EVENTS.pop(task_id, None)
+
+                        if task.get("cancelled"):
+                            task["status"] = "cancelled"
+                            task["completed_at"] = time.time()
+                            task["final_output"] = ctx.render()
+                            save_single_task(task_id)
+                            store.add_event(task_id, "task.cancelled", {})
+                            return
+
+                        task["status"] = "running"
+                        task["waiting_stage_index"] = None
+                        task["waiting_stage_name"] = None
+                        save_single_task(task_id)
                 elif "VERDICT: PASSED" in output or "TEST_PASSED" in output:
                     store.add_message(
                         task_id, stage["role"], "TEST_PASSED", "Semua pengujian dan verifikasi berhasil (VERDICT: PASSED).",
@@ -1314,36 +1337,39 @@ async def execute_pipeline(task_id: str):
 
         # Auto-write files if requested and working directory is set (with Scope Matrix enforcement & Snapshot)
         if task.get("auto_apply_files") and wdir and extracted:
-            written_files = []
-            blocked_files = []
-            snapshot_records = []
-            for item in extracted:
-                rel_p = item["path"]
-                if item.get("blocked"):
-                    blocked_files.append({"path": rel_p, "reason": item.get("blocked_reason")})
-                    continue
-                try:
-                    full_p = sanitize_path(os.path.join(wdir, rel_p.lstrip("/")), base_dir=wdir)
-                    os.makedirs(os.path.dirname(full_p), exist_ok=True)
-                    existed = os.path.exists(full_p)
-                    backup_p = f"{full_p}.bak"
-                    if existed:
-                        shutil.copy2(full_p, backup_p)
-                    with open(full_p, "w", encoding="utf-8") as fp:
-                        fp.write(item["content"])
-                    written_files.append(rel_p)
-                    snapshot_records.append({
-                        "target": full_p,
-                        "backup": backup_p,
-                        "existed": existed,
-                        "rel_path": rel_p
-                    })
-                except Exception as e:
-                    print(f"Error applying file {item['path']}: {e}")
-            task["applied_files"] = written_files
-            task["blocked_files"] = blocked_files
-            if snapshot_records:
-                save_apply_snapshot(wdir, task_id, snapshot_records, session_id=task.get("session_id"))
+            if not store.check_agent_permission("Coder", "filesystem", "write"):
+                store.add_event(task_id, "permission.denied", {"role": "Coder", "action": "filesystem.write"})
+            else:
+                written_files = []
+                blocked_files = []
+                snapshot_records = []
+                for item in extracted:
+                    rel_p = item["path"]
+                    if item.get("blocked"):
+                        blocked_files.append({"path": rel_p, "reason": item.get("blocked_reason")})
+                        continue
+                    try:
+                        full_p = sanitize_path(os.path.join(wdir, rel_p.lstrip("/")), base_dir=wdir)
+                        os.makedirs(os.path.dirname(full_p), exist_ok=True)
+                        existed = os.path.exists(full_p)
+                        backup_p = f"{full_p}.bak"
+                        if existed:
+                            shutil.copy2(full_p, backup_p)
+                        with open(full_p, "w", encoding="utf-8") as fp:
+                            fp.write(item["content"])
+                        written_files.append(rel_p)
+                        snapshot_records.append({
+                            "target": full_p,
+                            "backup": backup_p,
+                            "existed": existed,
+                            "rel_path": rel_p
+                        })
+                    except Exception as e:
+                        print(f"Error applying file {item['path']}: {e}")
+                task["applied_files"] = written_files
+                task["blocked_files"] = blocked_files
+                if snapshot_records:
+                    save_apply_snapshot(wdir, task_id, snapshot_records, session_id=task.get("session_id"))
 
         # Auto-save deliverable document if enabled
         if task.get("auto_save_artifact") and wdir:
@@ -1858,6 +1884,17 @@ async def update_agent_permissions(role: str, req: AgentPermissionsRequest):
     return {"status": "ok", "role": matched, "permissions": agent["permissions"]}
 
 
+class CheckAgentPermissionRequest(BaseModel):
+    capability: str
+    subaction: Optional[str] = None
+
+
+@app.post("/api/agents/{role}/check-permission")
+async def check_agent_permission_endpoint(role: str, req: CheckAgentPermissionRequest):
+    allowed = store.check_agent_permission(role, req.capability, req.subaction)
+    return {"role": role, "capability": req.capability, "subaction": req.subaction, "allowed": allowed}
+
+
 @app.get("/api/tasks/{task_id}/extracted-files")
 async def get_task_extracted_files(task_id: str):
     task = tasks_store.get(task_id)
@@ -1872,8 +1909,12 @@ async def apply_task_files(task_id: str):
         raise HTTPException(status_code=404, detail="Task not found")
     
     wdir = task.get("working_directory")
-    if not wdir or not os.path.exists(wdir):
+    if not wdir or not os.path.isdir(wdir):
         raise HTTPException(status_code=400, detail="Working directory tidak valid.")
+
+    # Scoped permissions: verify Coder role has filesystem: write permission
+    if not store.check_agent_permission("Coder", "filesystem", "write"):
+        raise HTTPException(status_code=403, detail="Izin ditolak: Agent 'Coder' tidak memiliki izin 'write' pada filesystem.")
 
     files = task.get("extracted_files", [])
     if not files:
@@ -2420,25 +2461,26 @@ def api_chat_session_modify_agents(session_id: str, req: ChatSessionAgentsModify
 
 def _detect_chat_agent(message: str, requested_agent: Optional[str], catalog: Dict[str, Any]) -> str:
     """Detect which agent should respond based on explicit request, mentions, or natural language."""
-    if requested_agent:
-        for k in catalog.keys():
-            if k.lower() == requested_agent.lower():
-                return k
-
-    # 1. Mention check: @researcher, @coder, @critic, @tutor, @qa, @architect, etc.
+    # 1. Mention check in message takes highest priority (@researcher, @coder, @critic, @tutor, etc.)
     mention_m = re.search(r'@([a-zA-Z0-9_\-]+)', message)
     if mention_m:
         cand = mention_m.group(1).lower()
         for k in catalog.keys():
-            if k.lower() == cand or cand in k.lower():
+            if k.lower() == cand:
                 return k
 
-    # 2. Natural language invocation: "Ask Researcher...", "Tanya Coder...", "Minta Critic...", "Suruh QA..."
-    phrase_m = re.search(r'\b(?:ask|tanya|minta|suruh|hubungi)\s+([a-zA-Z0-9_\-]+)\b', message, re.IGNORECASE)
+    # 2. Natural language invocation: "Ask Researcher...", "Tanya ke Coder...", "Minta Critic...", "Suruh QA..."
+    phrase_m = re.search(r'\b(?:ask|tanya|minta|suruh|hubungi)\s+(?:ke\s+|to\s+)?([a-zA-Z0-9_\-]+)\b', message, re.IGNORECASE)
     if phrase_m:
         cand = phrase_m.group(1).lower()
         for k in catalog.keys():
-            if k.lower() == cand or cand in k.lower():
+            if k.lower() == cand:
+                return k
+
+    # 3. Explicit requested_agent parameter (from UI dropdown) if user specifically chose a non-default specialist
+    if requested_agent and requested_agent.lower() not in ("auto", "none"):
+        for k in catalog.keys():
+            if k.lower() == requested_agent.lower():
                 return k
 
     return "Hermes"
@@ -2608,7 +2650,8 @@ async def api_chat(req: ChatRequest):
         # Emit agent.started event so client knows which specialist is working
         yield f"data: {json.dumps({'type': 'agent.started', 'agent': target_agent, 'icon': agent_spec.get('icon', '🤖')})}\n\n"
 
-        async for sse_line in _stream_chat_llm(llm_messages, model=model_override):
+        target_temp = float(agent_spec.get("temperature", 0.3))
+        async for sse_line in _stream_chat_llm(llm_messages, model=model_override, temperature=target_temp):
             # Parse final 'done' or 'error' event to persist assistant message
             try:
                 raw_data = sse_line[6:].strip() if sse_line.startswith("data: ") else sse_line.strip()
