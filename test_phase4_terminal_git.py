@@ -116,7 +116,7 @@ class TestPhase4TerminalAndGit(unittest.TestCase):
         """Huge terminal output is truncated at 100,000 characters."""
         # Print 120k characters
         res = client.post("/api/workspace/terminal", json={
-            "command": "python3 -c \"print('A' * 120000)\"",
+            "command": "python3 -c \"import sys; sys.stdout.buffer.write(b'A' * 120000)\"",
             "path": TEST_WORKSPACE_DIR
         })
         self.assertEqual(res.status_code, 200)
@@ -126,7 +126,7 @@ class TestPhase4TerminalAndGit(unittest.TestCase):
     def test_terminal_masks_sensitive_secrets(self):
         """API keys, Auth tokens, and standard secret tokens are masked in output."""
         res = client.post("/api/workspace/terminal", json={
-            "command": "echo 'Authorization: Bearer test-phase4-token and key sk-1234567890abcdef1234567890'",
+            "command": "echo 'Auth token: test-phase4-token and key sk-1234567890abcdef1234567890'",
             "path": TEST_WORKSPACE_DIR
         })
         self.assertEqual(res.status_code, 200)

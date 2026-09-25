@@ -11,6 +11,7 @@ import shutil
 import signal
 import sqlite3
 import subprocess
+import sys
 import time
 import uuid
 import yaml
@@ -27,6 +28,7 @@ from pydantic import BaseModel
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TASKS_FILE = store.JSON_BACKUP_PATH  # JSON_BACKUP: temporary mirror of SQLite state
+IS_WINDOWS = sys.platform.startswith("win")
 
 def _load_env_file(path: str) -> None:
     """Read simple KEY=VALUE lines from a local .env. Real env vars always win."""
@@ -62,9 +64,9 @@ def _env_paths(key: str, default: str) -> List[str]:
 
 # Workspace boundary: primary root plus explicit extra roots (never the whole $HOME).
 ALLOWED_ROOT = os.path.abspath(os.path.expandvars(os.path.expanduser(
-    os.environ.get("WORKSPACE_ROOT", os.path.expanduser("~/projects"))
+    os.environ.get("WORKSPACE_ROOT", os.path.join(os.path.expanduser("~"), "projects"))
 )))
-EXTRA_ROOTS = _env_paths("WORKSPACE_EXTRA_ROOTS", os.path.expanduser("~/Documents"))
+EXTRA_ROOTS = _env_paths("WORKSPACE_EXTRA_ROOTS", os.path.join(os.path.expanduser("~"), "Documents"))
 ALLOWED_ROOTS = [ALLOWED_ROOT] + [r for r in EXTRA_ROOTS if r != ALLOWED_ROOT]
 DEFAULT_WORKSPACE = os.environ.get("DEFAULT_WORKSPACE", ALLOWED_ROOT)
 AUTH_TOKEN = os.environ.get("AI_TEAM_AUTH_TOKEN", "").strip()
@@ -74,7 +76,7 @@ ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").spli
 ]
 
 # Hermes Integration Constants
-HERMES_DIR = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+HERMES_DIR = os.environ.get("HERMES_HOME", os.path.join(os.path.expanduser("~"), ".hermes"))
 HERMES_SKILLS_DIR = os.path.join(HERMES_DIR, "skills")
 LOCAL_SKILLS_DIR = os.path.join(BASE_DIR, "skills")
 HERMES_STATE_DB = os.path.join(HERMES_DIR, "state.db")
@@ -153,7 +155,8 @@ def get_llm_config() -> Tuple[str, str, str]:
 
     # Auto-detect local 9Router sqlite if key not passed in env
     if not key:
-        db_path = os.path.expanduser("~/.9router/db/data.sqlite")
+        default_9r = os.path.join(os.path.expanduser("~"), ".9router", "db", "data.sqlite")
+        db_path = os.environ.get("NINEROUTER_DB", default_9r)
         if os.path.exists(db_path):
             try:
                 conn = sqlite3.connect(db_path)
@@ -1966,16 +1969,46 @@ async def apply_task_files(task_id: str):
         "blocked_count": len(blocked)
     }
 
+def _clean_terminal_env() -> Dict[str, str]:
+    """Sanitize environment variables for spawned terminal subprocesses.
+    
+    Removes master auth tokens, provider secrets, and credential keys so normal
+    command execution (such as `env`, `printenv`, `set`) inside the workspace cannot
+    dump server secrets directly.
+    """
+    clean = dict(os.environ)
+    sensitive_keys = {
+        "AI_TEAM_AUTH_TOKEN", "LLM_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+        "GITHUB_TOKEN", "GH_TOKEN", "GIT_TOKEN", "AWS_SECRET_ACCESS_KEY",
+        "DATABASE_URL", "SECRET_KEY"
+    }
+    for k in list(clean.keys()):
+        if k in sensitive_keys or any(sub in k.upper() for sub in ("AUTH_TOKEN", "SECRET_KEY", "PRIVATE_KEY")):
+            del clean[k]
+    return clean
+
+
 def _mask_sensitive_text(text: str) -> str:
     """Mask known sensitive environment tokens, API keys, and patterns in terminal outputs."""
     if not text:
         return text
     masked = text
-    # Mask explicitly configured keys/tokens
+    # Mask explicitly configured keys/tokens (check module AUTH_TOKEN, current env, and .env file values)
+    configured_secrets = set()
+    global AUTH_TOKEN
+    if AUTH_TOKEN and len(AUTH_TOKEN) >= 4:
+        configured_secrets.add(AUTH_TOKEN)
     for env_name in ("AI_TEAM_AUTH_TOKEN", "LLM_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
         val = os.environ.get(env_name, "").strip()
         if val and len(val) >= 4:
-            masked = masked.replace(val, "[REDACTED_SECRET]")
+            configured_secrets.add(val)
+
+    for sec in configured_secrets:
+        masked = masked.replace(sec, "[REDACTED_SECRET]")
+
+    # Mask key=value assignments: AI_TEAM_AUTH_TOKEN=..., LLM_API_KEY=..., etc.
+    masked = re.sub(r'(AI_TEAM_AUTH_TOKEN=)[^\s&|;]+', r'\1[REDACTED_SECRET]', masked)
+    masked = re.sub(r'([A-Z0-9_]*(?:KEY|TOKEN|SECRET)[A-Z0-9_]*=)[^\s&|;]+', r'\1[REDACTED_SECRET]', masked)
 
     # Mask standard API key / token formats: sk-..., Bearer ..., gh[pousr]-...
     masked = re.sub(r'sk-[a-zA-Z0-9_-]{20,}', '[REDACTED_API_KEY]', masked)
@@ -1989,6 +2022,39 @@ class TerminalExecuteRequest(BaseModel):
     command: str
     path: Optional[str] = None
     timeout: Optional[int] = 30
+
+
+async def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
+    """Platform-aware process tree termination.
+    
+    On Windows: uses taskkill /F /T /PID to recursively kill process tree.
+    On Unix: uses os.killpg with SIGKILL on the process group.
+    """
+    if not proc or proc.returncode is not None:
+        return
+
+    pid = proc.pid
+    if IS_WINDOWS:
+        try:
+            kill_proc = await asyncio.create_subprocess_exec(
+                "taskkill", "/F", "/T", "/PID", str(pid),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
+            )
+            await asyncio.wait_for(kill_proc.wait(), timeout=3.0)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    else:
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
 
 @app.post("/api/workspace/terminal")
@@ -2010,12 +2076,19 @@ async def execute_workspace_terminal(req: TerminalExecuteRequest):
     start_t = time.time()
     try:
         # Execute asynchronously with process group to guarantee clean subprocess teardown
+        # and filtered environment to prevent secret leakage via `env`/`printenv`
+        subproc_kwargs = {
+            "cwd": cwd,
+            "env": _clean_terminal_env(),
+            "stdout": asyncio.subprocess.PIPE,
+            "stderr": asyncio.subprocess.PIPE,
+        }
+        if not IS_WINDOWS:
+            subproc_kwargs["start_new_session"] = True
+
         proc = await asyncio.create_subprocess_shell(
             raw_cmd,
-            cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True
+            **subproc_kwargs
         )
 
         try:
@@ -2025,15 +2098,12 @@ async def execute_workspace_terminal(req: TerminalExecuteRequest):
             )
             exit_code = proc.returncode if proc.returncode is not None else 0
         except asyncio.TimeoutError:
+            await _kill_process_tree(proc)
             try:
-                # Terminate the entire process group
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                # Non-blocking wait for communication completion after kill
+                stdout_data, stderr_data = await asyncio.wait_for(proc.communicate(), timeout=2.0)
             except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-            stdout_data, stderr_data = await proc.communicate()
+                stdout_data, stderr_data = b"", b""
             duration_ms = int((time.time() - start_t) * 1000)
             return {
                 "stdout": _mask_sensitive_text(stdout_data.decode("utf-8", errors="ignore")[:max_output_chars]),
@@ -2277,7 +2347,8 @@ async def check_syntax(req: CheckSyntaxRequest):
         node_bin = os.environ.get("NODE_BIN") or shutil.which("node")
         if not node_bin:
             # newest installed nvm node, no machine-specific version pinned
-            candidates = sorted(glob.glob(os.path.expanduser("~/.nvm/versions/node/*/bin/node")))
+            nvm_pattern = os.path.join(os.path.expanduser("~"), ".nvm", "versions", "node", "*", "bin", "node")
+            candidates = sorted(glob.glob(nvm_pattern))
             if candidates:
                 node_bin = candidates[-1]
         if node_bin:

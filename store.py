@@ -11,6 +11,7 @@ No framework, stdlib sqlite3 only.
 """
 import json
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -625,14 +626,14 @@ def seed_workspaces(presets: List[Dict[str, str]], default_root: str,
         if not root or root in known_roots:
             continue
         upsert_workspace({
-            "name": item.get("label") or os.path.basename(root.rstrip("/")) or root,
+            "name": item.get("label") or _get_path_name(root) or root,
             "root": root,
             "is_default": root == default_root,
         })
         created += 1
     if default_root and not any(w["is_default"] for w in list_workspaces()):
         if default_root not in known_roots:
-            upsert_workspace({"name": os.path.basename(default_root.rstrip("/")) or "default",
+            upsert_workspace({"name": _get_path_name(default_root) or "default",
                               "root": default_root, "is_default": True})
             created += 1
         else:
@@ -645,7 +646,13 @@ def seed_workspaces(presets: List[Dict[str, str]], default_root: str,
     return created
 
 
-# ---------------------------------------------------------------- agents + presets
+def _get_path_name(path_str: str) -> str:
+    """Extract folder/file name handling both POSIX and Windows path separators."""
+    clean = (path_str or "").rstrip("/\\")
+    if not clean:
+        return ""
+    # Use PurePath or regex split
+    return re.split(r'[\\/]', clean)[-1]
 
 def _agent_row_to_dict(r: sqlite3.Row) -> Dict[str, Any]:
     return {
