@@ -8,6 +8,7 @@ import os
 import py_compile
 import re
 import shutil
+import signal
 import sqlite3
 import subprocess
 import time
@@ -1964,6 +1965,194 @@ async def apply_task_files(task_id: str):
         "blocked": blocked,
         "blocked_count": len(blocked)
     }
+
+def _mask_sensitive_text(text: str) -> str:
+    """Mask known sensitive environment tokens, API keys, and patterns in terminal outputs."""
+    if not text:
+        return text
+    masked = text
+    # Mask explicitly configured keys/tokens
+    for env_name in ("AI_TEAM_AUTH_TOKEN", "LLM_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+        val = os.environ.get(env_name, "").strip()
+        if val and len(val) >= 4:
+            masked = masked.replace(val, "[REDACTED_SECRET]")
+
+    # Mask standard API key / token formats: sk-..., Bearer ..., gh[pousr]-...
+    masked = re.sub(r'sk-[a-zA-Z0-9_-]{20,}', '[REDACTED_API_KEY]', masked)
+    masked = re.sub(r'gh[pousr]_[a-zA-Z0-9]{36,}', '[REDACTED_GITHUB_TOKEN]', masked)
+    masked = re.sub(r'(Bearer\s+)[a-zA-Z0-9_\-\.]{16,}', r'\1[REDACTED_TOKEN]', masked, flags=re.IGNORECASE)
+    masked = re.sub(r'(https?://)[^:\s]+:[^@\s]+@', r'\1[REDACTED_CREDENTIALS]@', masked)
+    return masked
+
+
+class TerminalExecuteRequest(BaseModel):
+    command: str
+    path: Optional[str] = None
+    timeout: Optional[int] = 30
+
+
+@app.post("/api/workspace/terminal")
+async def execute_workspace_terminal(req: TerminalExecuteRequest):
+    """Execute a shell/CLI command scoped strictly inside ALLOWED_ROOTS workspace directory."""
+    raw_cmd = (req.command or "").strip()
+    if not raw_cmd:
+        raise HTTPException(status_code=400, detail="Perintah tidak boleh kosong.")
+
+    # 1. Primary Security Control: Path & CWD Boundary check strictly within ALLOWED_ROOTS
+    cwd = sanitize_path(req.path or DEFAULT_WORKSPACE)
+    if not os.path.isdir(cwd):
+        raise HTTPException(status_code=400, detail="Direktori kerja (cwd) tidak valid.")
+
+    # 2. Timeout and output size limits
+    timeout_sec = min(max(int(req.timeout or 30), 1), 120)
+    max_output_chars = 100_000
+
+    start_t = time.time()
+    try:
+        # Execute asynchronously with process group to guarantee clean subprocess teardown
+        proc = await asyncio.create_subprocess_shell(
+            raw_cmd,
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True
+        )
+
+        try:
+            stdout_data, stderr_data = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=timeout_sec
+            )
+            exit_code = proc.returncode if proc.returncode is not None else 0
+        except asyncio.TimeoutError:
+            try:
+                # Terminate the entire process group
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            stdout_data, stderr_data = await proc.communicate()
+            duration_ms = int((time.time() - start_t) * 1000)
+            return {
+                "stdout": _mask_sensitive_text(stdout_data.decode("utf-8", errors="ignore")[:max_output_chars]),
+                "stderr": f"Error: Command timed out after {timeout_sec} seconds.",
+                "exit_code": -1,
+                "duration_ms": duration_ms,
+                "cwd": cwd,
+                "timed_out": True
+            }
+
+        duration_ms = int((time.time() - start_t) * 1000)
+        stdout_str = stdout_data.decode("utf-8", errors="ignore")
+        stderr_str = stderr_data.decode("utf-8", errors="ignore")
+
+        if len(stdout_str) > max_output_chars:
+            stdout_str = stdout_str[:max_output_chars] + f"\n... [Output truncated: exceeded {max_output_chars} chars]"
+        if len(stderr_str) > max_output_chars:
+            stderr_str = stderr_str[:max_output_chars] + f"\n... [Error output truncated: exceeded {max_output_chars} chars]"
+
+        return {
+            "stdout": _mask_sensitive_text(stdout_str),
+            "stderr": _mask_sensitive_text(stderr_str),
+            "exit_code": exit_code,
+            "duration_ms": duration_ms,
+            "cwd": cwd,
+            "timed_out": False
+        }
+    except Exception as e:
+        duration_ms = int((time.time() - start_t) * 1000)
+        return {
+            "stdout": "",
+            "stderr": f"Execution error: {str(e)}",
+            "exit_code": 1,
+            "duration_ms": duration_ms,
+            "cwd": cwd,
+            "timed_out": False
+        }
+
+
+@app.get("/api/workspace/git/status")
+async def api_workspace_git_status(path: Optional[str] = None):
+    """Get git status scoped strictly to the current workspace repository."""
+    target_dir = sanitize_path(path or DEFAULT_WORKSPACE)
+    if not os.path.isdir(target_dir):
+        raise HTTPException(status_code=400, detail="Direktori workspace tidak valid.")
+    git_info = get_git_info(target_dir)
+    return {
+        "path": target_dir,
+        "is_git": git_info["is_git"],
+        "branch": git_info["branch"],
+        "clean": git_info["clean"],
+        "status_lines": git_info["status_lines"]
+    }
+
+
+@app.get("/api/workspace/git/diff")
+async def api_workspace_git_diff(path: Optional[str] = None, file_path: Optional[str] = None):
+    """Get read-only git unified diff scoped strictly to the current workspace repository."""
+    target_dir = sanitize_path(path or DEFAULT_WORKSPACE)
+    if not os.path.isdir(target_dir):
+        raise HTTPException(status_code=400, detail="Direktori workspace tidak valid.")
+
+    git_dir = os.path.join(target_dir, ".git")
+    if not os.path.exists(git_dir):
+        return {
+            "path": target_dir,
+            "is_git": False,
+            "diff_lines": [],
+            "raw_diff": "",
+            "is_empty": True
+        }
+
+    cmd = ["git", "-C", target_dir, "diff", "HEAD"]
+    if file_path:
+        # Sanitize single file relative path inside target_dir
+        safe_file = sanitize_path(os.path.join(target_dir, file_path.lstrip("/")), base_dir=target_dir)
+        rel_f = os.path.relpath(safe_file, target_dir)
+        cmd.extend(["--", rel_f])
+
+    try:
+        raw_diff = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=10).decode("utf-8", errors="ignore")
+    except Exception as e:
+        raw_diff = ""
+
+    parsed_lines = []
+    additions = 0
+    deletions = 0
+    files_changed = 0
+
+    for line in raw_diff.splitlines():
+        line_clean = line.rstrip("\r\n")
+        if line_clean.startswith("diff --git"):
+            files_changed += 1
+            parsed_lines.append({"type": "file_header", "text": line_clean})
+        elif line_clean.startswith("+++") or line_clean.startswith("---"):
+            parsed_lines.append({"type": "header", "text": line_clean})
+        elif line_clean.startswith("@@"):
+            parsed_lines.append({"type": "chunk", "text": line_clean})
+        elif line_clean.startswith("+"):
+            additions += 1
+            parsed_lines.append({"type": "add", "text": line_clean[1:]})
+        elif line_clean.startswith("-"):
+            deletions += 1
+            parsed_lines.append({"type": "del", "text": line_clean[1:]})
+        else:
+            txt = line_clean[1:] if line_clean.startswith(" ") else line_clean
+            parsed_lines.append({"type": "ctx", "text": txt})
+
+    return {
+        "path": target_dir,
+        "is_git": True,
+        "is_empty": len(raw_diff.strip()) == 0,
+        "raw_diff": _mask_sensitive_text(raw_diff[:100_000]),
+        "diff_lines": parsed_lines[:2000],
+        "files_changed": files_changed,
+        "additions": additions,
+        "deletions": deletions
+    }
+
 
 class DiffRequest(BaseModel):
     path: str

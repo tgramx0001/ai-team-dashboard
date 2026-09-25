@@ -717,12 +717,18 @@
                 <span id="drawerGitBranchBadge" class="text-brand-light font-bold"></span>
               </div>
               <div class="flex items-center gap-2">
+                <button type="button" onclick="fetchDrawerGitDiff()" class="hover:text-white transition">Git Diff</button>
                 <button type="button" onclick="fetchDrawerGitStatus()" class="hover:text-white transition">Git Status</button>
                 <button type="button" onclick="clearMiniTerminal()" class="hover:text-white transition">Clear</button>
               </div>
             </div>
             <div id="drawerTerminalLogs" class="flex-1 p-2 text-[10px] font-mono text-[#8a8f98] overflow-y-auto space-y-1">
               <div class="text-slate-500">> Ready. Project console initialized.</div>
+            </div>
+            <div class="h-8 px-2 border-t border-subtle bg-surface/50 flex items-center gap-1.5 shrink-0">
+              <span class="text-[10px] font-mono text-brand-light font-bold select-none">$</span>
+              <input id="drawerTerminalInput" type="text" placeholder="Ketik perintah (contoh: git status, ls -la, python3 --version)..." class="flex-1 bg-transparent text-[11px] font-mono text-white placeholder-[#62666d] outline-none" onkeydown="handleTerminalInputKey(event)">
+              <button type="button" onclick="executeDrawerTerminal()" class="px-2 py-0.5 rounded bg-brand/20 hover:bg-brand/30 text-brand-light text-[10px] font-mono transition">Run</button>
             </div>
           </div>
         </div>
@@ -3283,12 +3289,84 @@
       if (box) box.innerHTML = '<div class="text-slate-500">> Console cleared.</div>';
     }
 
+    let terminalHistory = [];
+    let terminalHistoryIndex = -1;
+
+    function handleTerminalInputKey(e) {
+      if (e.key === 'Enter') {
+        executeDrawerTerminal();
+      } else if (e.key === 'ArrowUp') {
+        if (terminalHistory.length > 0) {
+          if (terminalHistoryIndex === -1) {
+            terminalHistoryIndex = terminalHistory.length - 1;
+          } else if (terminalHistoryIndex > 0) {
+            terminalHistoryIndex--;
+          }
+          e.target.value = terminalHistory[terminalHistoryIndex] || '';
+        }
+      } else if (e.key === 'ArrowDown') {
+        if (terminalHistoryIndex !== -1) {
+          if (terminalHistoryIndex < terminalHistory.length - 1) {
+            terminalHistoryIndex++;
+            e.target.value = terminalHistory[terminalHistoryIndex] || '';
+          } else {
+            terminalHistoryIndex = -1;
+            e.target.value = '';
+          }
+        }
+      }
+    }
+
+    async function executeDrawerTerminal() {
+      const input = document.getElementById('drawerTerminalInput');
+      if (!input) return;
+      const cmd = (input.value || '').trim();
+      if (!cmd) return;
+
+      terminalHistory.push(cmd);
+      terminalHistoryIndex = -1;
+      input.value = '';
+
+      appendMiniTerminal(`$ ${cmd}`);
+      try {
+        const res = await fetch('/api/workspace/terminal', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: cmd, path: currentWorkspace })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          appendMiniTerminal(`✕ [EXIT ${res.status}] ${data.detail || 'Command failed'}`);
+          return;
+        }
+        if (data.stdout) {
+          const lines = data.stdout.split('\n');
+          lines.forEach(l => {
+            if (l.trim() || lines.length === 1) appendMiniTerminal(`  ${l}`);
+          });
+        }
+        if (data.stderr) {
+          const errLines = data.stderr.split('\n');
+          errLines.forEach(l => {
+            if (l.trim() || errLines.length === 1) appendMiniTerminal(`! ${l}`);
+          });
+        }
+        const statusPrefix = data.exit_code === 0 ? '✓' : '✕';
+        appendMiniTerminal(`${statusPrefix} [Exit: ${data.exit_code} | ${data.duration_ms}ms | cwd: ${data.cwd}]`);
+        if (cmd.startsWith('git ')) {
+          fetchDrawerGitStatus();
+        }
+      } catch (e) {
+        appendMiniTerminal(`✕ Error executing command: ${e.message}`);
+      }
+    }
+
     async function fetchDrawerGitStatus() {
       appendMiniTerminal(`> git status (${currentWorkspace})...`);
       try {
-        const res = await fetch(`/api/workspace/info?path=${encodeURIComponent(currentWorkspace)}`);
+        const res = await fetch(`/api/workspace/git/status?path=${encodeURIComponent(currentWorkspace)}`);
         const data = await res.json();
-        const git = data.git || {};
+        const git = data.git || data;
         const badge = document.getElementById('drawerGitBranchBadge');
         if (git.is_git) {
           if (badge) badge.innerText = `[${git.branch || 'HEAD'}]`;
@@ -3300,6 +3378,34 @@
         } else {
           if (badge) badge.innerText = '';
           appendMiniTerminal('  (Bukan repositori git)');
+        }
+      } catch (e) {
+        appendMiniTerminal(`  Error: ${e.message}`);
+      }
+    }
+
+    async function fetchDrawerGitDiff() {
+      appendMiniTerminal(`> git diff (${currentWorkspace})...`);
+      try {
+        const res = await fetch(`/api/workspace/git/diff?path=${encodeURIComponent(currentWorkspace)}`);
+        const data = await res.json();
+        if (!res.ok) {
+          appendMiniTerminal(`✕ ${data.detail || 'Git diff failed'}`);
+          return;
+        }
+        if (!data.is_git) {
+          appendMiniTerminal('  (Bukan repositori git)');
+          return;
+        }
+        if (data.is_empty) {
+          appendMiniTerminal('  Tidak ada perubahan diff uncommitted (working tree bersih).');
+          return;
+        }
+        appendMiniTerminal(`✓ Diff (${data.files_changed} file berubah):`);
+        const lines = data.raw_diff.split('\n');
+        lines.slice(0, 100).forEach(l => appendMiniTerminal(`  ${l}`));
+        if (lines.length > 100) {
+          appendMiniTerminal(`  ... (${lines.length - 100} baris diff lainnya dipotong)`);
         }
       } catch (e) {
         appendMiniTerminal(`  Error: ${e.message}`);
