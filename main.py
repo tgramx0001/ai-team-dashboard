@@ -14,16 +14,18 @@ import time
 import uuid
 import yaml
 from pathlib import Path
+
+import store
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-TASKS_FILE = os.path.join(BASE_DIR, "tasks.json")
+TASKS_FILE = store.JSON_BACKUP_PATH  # JSON_BACKUP: temporary mirror of SQLite state
 
 def _load_env_file(path: str) -> None:
     """Read simple KEY=VALUE lines from a local .env. Real env vars always win."""
@@ -374,107 +376,13 @@ def update_hermes_model(model_name: str, apply_globally: bool = False) -> Option
     except Exception:
         return None
 
-SPECIALIST_CATALOG: Dict[str, Dict[str, Any]] = {
-    "Architect": {
-        "role": "Architect",
-        "name": "System Architect",
-        "icon": "📐",
-        "temperature": 0.1,
-        "system": (
-            "Kamu adalah Principal System Architect. Rancang arsitektur sistem untuk kebutuhan fitur berikut. "
-            "Ikuti aturan arsitektur proyek (AGENTS.md) jika ada. Tentukan entity relationship/schema database, struktur tabel, nama file yang akan dibuat/diubah, dan pola endpoint API."
-        )
-    },
-    "UI/UX": {
-        "role": "UI/UX",
-        "name": "UI/UX Specialist",
-        "icon": "🎨",
-        "temperature": 0.3,
-        "system": (
-            "Kamu adalah Senior UI/UX Specialist. Berdasarkan spesifikasi arsitektur, buat wireframe tata letak layar (screen layout), alur navigasi pengguna (user flow), daftar komponen interaktif, dan panduan styling yang jelas."
-        )
-    },
-    "Coder": {
-        "role": "Coder",
-        "name": "Lead Developer",
-        "icon": "⚡",
-        "temperature": 0.1,
-        "system": (
-            "Kamu adalah Lead Full-Stack Developer handal. Tulis kode implementasi produksi yang bersih, modular, dan lengkap (backend/frontend). Tanpa placeholder malas (tulis kode nyata).\n\n"
-            "PENTING: Setiap file kode yang kamu buat/ubah WAJIB ditulis dengan header format multi-file terpisah berikut:\n"
-            "### FILE: path/to/file.ext\n```ext\n// kode lengkap di sini\n```\n\n"
-            "ANTI-GREENFIELD & CODE INTEGRITY RULES (STRICT):\n"
-            "1. DILARANG KERAS merombak atau menulis ulang seluruh file proyek dari nol menjadi stub ringkas/dummy!\n"
-            "2. PERTAHANKAN seluruh endpoint, fungsi, router, model, dan struktur logika yang sudah ada sebelumnya. Lakukan HANYA perubahan bertarget (surgical targeted implementation) sesuai instruksi tugas.\n"
-            "3. DILARANG KERAS memalsukan logika nyata dengan timer tidur tiruan (seperti asyncio.sleep palsu untuk menggantikan proses riil).\n"
-            "4. Wajib patuhi batasan Scope Matrix: dilarang menyentuh file dalam forbidden_files."
-        )
-    },
-    "Security": {
-        "role": "Security",
-        "name": "Security Auditor",
-        "icon": "🔍",
-        "temperature": 0.1,
-        "system": (
-            "Kamu adalah Senior Application Security Auditor & Penetration Tester. Analisis codebase target secara mendalam: periksa celah OWASP, SQL Injection, Auth Bypass, Broken Access Control / IDOR, Race Condition, Token Leakage, dan penanganan input yang tidak aman. Sajikan laporan audit terstruktur: Lokasi file/line, tingkat keparahan (Critical/High/Medium), bukti celah, dan rekomendasi mitigasi teknis yang konkret."
-        )
-    },
-    "QA": {
-        "role": "QA",
-        "name": "QA & Security Engineer",
-        "icon": "🛡️",
-        "temperature": 0.1,
-        "system": (
-            "Kamu adalah Senior QA & Security Engineer. Audit kode dari Coder. Cari celah keamanan, race condition, error penanganan null, dan edge case. Periksa apakah kode sesuai dengan struktur proyek.\n\n"
-            "REGRESSION & SCOPE GATE (STRICT):\n"
-            "1. Periksa apakah ada fungsi/fitur/endpoint lama yang terhapus atau disederhanakan tanpa izin.\n"
-            "2. Periksa apakah Coder menggunakan mock timers/stub palsu (seperti asyncio.sleep).\n"
-            "3. Periksa apakah kode melanggar batasan Scope Matrix (mengubah forbidden_files).\n"
-            "Jika ditemukan regresi, stub malas, atau pelanggaran scope, WAJIB tolak dengan VERDICT: NEEDS_REVISION.\n\n"
-            "PENTING: Di baris paling akhir dari evaluasimu, WAJIB tuliskan satu baris penutup status:\n"
-            "VERDICT: PASSED atau VERDICT: NEEDS_REVISION\n"
-            "Jika NEEDS_REVISION, sertakan daftar ringkas poin bug yang wajib diperbaiki."
-        )
-    },
-    "Researcher": {
-        "role": "Researcher",
-        "name": "Pustaka & Riset",
-        "icon": "🔍",
-        "temperature": 0.3,
-        "system": (
-            "Kamu adalah Peneliti & Akademisi Senior. Analisis topik tugas/makalah, petakan konsep teori utama, fakta relevan, terminologi penting, dan tinjauan literatur yang wajib dimasukkan. Perhatikan aturan proyek (AGENTS.md) jika ada."
-        )
-    },
-    "Planner": {
-        "role": "Planner",
-        "name": "Struktur & Outline",
-        "icon": "📋",
-        "temperature": 0.2,
-        "system": (
-            "Kamu adalah Perancang Struktur Tulisan Akademik. Menggunakan hasil temuan Researcher dan konteks proyek, buatlah struktur outline laporan lengkap (Bab 1 Pendahuluan, Bab 2 Kajian Teori, Bab 3 Pembahasan/Analisis, Bab 4 Kesimpulan & Saran)."
-        )
-    },
-    "Writer": {
-        "role": "Writer",
-        "name": "Penulis Makalah",
-        "icon": "✍️",
-        "temperature": 0.4,
-        "system": (
-            "Kamu adalah Penulis Akademik Ilmiah. Berdasarkan outline dari Planner dan rujukan Researcher, tuliskan draf pembahasan komprehensif dengan bahasa formal baku Indonesia (EYD), argumentasi logis, dan alur terstruktur."
-        )
-    },
-    "Reviewer": {
-        "role": "Reviewer",
-        "name": "Reviewer & QA Akademik",
-        "icon": "🎯",
-        "temperature": 0.2,
-        "system": (
-            "Kamu adalah Dosen Reviewer Akademik. Evaluasi tulisan dari Penulis. Periksa konsistensi argumen, kejelasan bahasa, kelengkapan pembahasan, dan perbaiki bagian yang kurang tajam. Di baris paling akhir dari evaluasimu, berikan status kelayakan dalam format wajib:\nVERDICT: PASSED atau VERDICT: NEEDS_REVISION\nJika NEEDS_REVISION, sertakan catatan perbaikan spesifik."
-        )
-    }
-}
+# Agent registry lives in SQLite (seeded from registry/agents.json) and presets in
+# registry/presets.json -- configurable data, not hardcoded Python structures.
+SPECIALIST_CATALOG: Dict[str, Dict[str, Any]] = store.load_agents()
+PRESETS: Dict[str, Dict[str, Any]] = store.load_presets()
 
 def parse_orchestrator_plan(text: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    catalog = store.load_agents() or SPECIALIST_CATALOG
     m = re.search(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', text)
     data = None
     if m:
@@ -508,12 +416,12 @@ def parse_orchestrator_plan(text: str) -> Tuple[List[Dict[str, Any]], Dict[str, 
         roles = data.get("selected_roles") or data.get("stages") or []
         for r in roles:
             role_key = None
-            for k in SPECIALIST_CATALOG.keys():
+            for k in catalog.keys():
                 if k.lower() == str(r).lower() or k.lower() in str(r).lower() or str(r).lower() in k.lower():
                     role_key = k
                     break
-            if role_key and role_key in SPECIALIST_CATALOG:
-                spec = SPECIALIST_CATALOG[role_key]
+            if role_key and role_key in catalog:
+                spec = catalog[role_key]
                 stages.append({
                     "role": spec["role"],
                     "name": spec["name"],
@@ -572,175 +480,20 @@ def parse_orchestrator_plan(text: str) -> Tuple[List[Dict[str, Any]], Dict[str, 
                 "role_boundaries": {}
             }
         for r in fallback_roles:
-            spec = SPECIALIST_CATALOG[r]
-            stages.append({
-                "role": spec["role"],
-                "name": spec["name"],
-                "icon": spec.get("icon", "🤖"),
-                "system": spec["system"],
-                "temperature": spec.get("temperature", 0.1),
-                "status": "waiting",
-                "output": "",
-                "error": None
-            })
+            if r in catalog:
+                spec = catalog[r]
+                stages.append({
+                    "role": spec["role"],
+                    "name": spec["name"],
+                    "icon": spec.get("icon", "🤖"),
+                    "system": spec["system"],
+                    "temperature": spec.get("temperature", 0.1),
+                    "status": "waiting",
+                    "output": "",
+                    "error": None
+                })
 
     return stages, scope_matrix
-
-PRESETS: Dict[str, Dict[str, Any]] = {
-    "auto": {
-        "id": "auto",
-        "title": "Mode Auto-Pilot (Dynamic Orchestrator)",
-        "icon": "🤖",
-        "description": "Orchestrator AI menganalisis tugas, menyusun Scope Matrix perlindungan file, dan memilih tim spesialis yang tepat.",
-        "stages": [
-            {
-                "role": "Orchestrator",
-                "name": "AI Team Orchestrator",
-                "icon": "🧠",
-                "temperature": 0.1,
-                "system": (
-                    "Kamu adalah AI Team Orchestrator & Technical Project Lead handal.\n"
-                    "Tugasmu adalah menganalisis target tugas dari user, konteks arsitektur proyek (AGENTS.md), dan repositori skeleton, "
-                    "lalu menyusun tim kerja (pipeline) yang paling efisien serta SCOPE MATRIX untuk membatasi ruang lingkup pengerjaan agar agen downstream tidak melebar atau merusak file yang tidak diminta.\n\n"
-                    "KATALOG SPESIALIS YANG TERSEDIA:\n"
-                    "- 'Architect' (System Architect): Rancang arsitektur, skema DB/ERD, struktur modul. HANYA untuk fitur baru atau refactor besar. DILARANG jika tugas murni bugfix kecil atau styling UI!\n"
-                    "- 'UI/UX' (UI/UX Specialist): Wireframe visual, user flow, component styling. HANYA jika tugas melibatkan tampilan visual / frontend UI. DILARANG diikutsertakan jika tugas murni backend, API, security audit, database, atau bugfix non-UI!\n"
-                    "- 'Coder' (Lead Developer): Menulis/mengubah kode sumber multi-file produksi (### FILE:).\n"
-                    "- 'Security' (Security Auditor): Khusus audit celah OWASP, SQLi, Auth, Token, Race Condition.\n"
-                    "- 'QA' (QA & Security Engineer): Verifikasi kode akhir & penguji batas (VERDICT: PASSED/NEEDS_REVISION).\n"
-                    "- 'Researcher' (Pustaka & Riset): Konsep teori & literatur (khusus makalah/kuliah).\n"
-                    "- 'Writer' (Penulis Makalah): Penulisan draf akademik (khusus makalah/kuliah).\n"
-                    "- 'Reviewer' (Reviewer Akademik): Telaah naskah akademik (khusus makalah/kuliah).\n\n"
-                    "PANDUAN SCOPE MATRIX:\n"
-                    "1. Identifikasi file yang BOLEH diubah (allowed_files) dan file yang DILARANG disentuh (forbidden_files).\n"
-                    "   Contoh: Jika tugas 'perbaiki UI index.html', allowed_files=['index.html'], forbidden_files=['main.py', 'test_security.py'].\n"
-                    "2. Tentukan peran yang DIPILIH (selected_roles) dan peran yang DI-BYPASS / DILEWATI (bypassed_roles).\n"
-                    "3. Berikan instruksi batasan per-peran (role_boundaries) agar agen downstream tidak over-engineering.\n\n"
-                    "FORMAT KELUARAN:\n"
-                    "Tuliskan analisis 1-2 paragraf mengenai strategi pengerjaan tugas, tim spesialis, dan Scope Matrix.\n"
-                    "Di baris paling akhir, WAJIB sertakan blok JSON valid berikut:\n"
-                    "```json\n"
-                    "{\n"
-                    "  \"task_type\": \"SECURITY_AUDIT | FEATURE_DEV | BACKEND_API | FRONTEND_UI | BUGFIX | ACADEMIC\",\n"
-                    "  \"target_scope\": \"Deskripsi ruang lingkup yang diperbolehkan diubah\",\n"
-                    "  \"allowed_files\": [\"file1.ext\", \"file2.ext\"],\n"
-                    "  \"forbidden_files\": [\"file_a.ext\", \"file_b.ext\"],\n"
-                    "  \"selected_roles\": [\"Role1\", \"Role2\"],\n"
-                    "  \"bypassed_roles\": [\"RoleX\", \"RoleY\"],\n"
-                    "  \"role_boundaries\": {\n"
-                    "    \"Architect\": \"Bypass jika tidak ada perubahan skema/API\",\n"
-                    "    \"UI/UX\": \"Fokus komponen dan styling\",\n"
-                    "    \"Coder\": \"Hanya ubah file dalam allowed_files, dilarang sentuh forbidden_files dan dilarang buat stub dummy\"\n"
-                    "  },\n"
-                    "  \"reasoning\": \"Penjelasan singkat mengapa tim dan batasan ini yang dipilih\"\n"
-                    "}\n"
-                    "```"
-                )
-            }
-        ]
-    },
-    "kuliah": {
-        "id": "kuliah",
-        "title": "Mode Kuliah & Riset Akademik",
-        "icon": "🎓",
-        "description": "Penyusunan tugas, makalah, review jurnal, dan laporan berbasis metodologi.",
-        "stages": [
-            {
-                "role": "Researcher",
-                "name": "Pustaka & Riset",
-                "icon": "🔍",
-                "temperature": 0.3,
-                "system": "Kamu adalah Peneliti & Akademisi Senior. Analisis topik tugas/makalah, petakan konsep teori utama, fakta relevan, terminologi penting, dan tinjauan literatur yang wajib dimasukkan. Perhatikan aturan proyek (AGENTS.md) jika ada."
-            },
-            {
-                "role": "Planner",
-                "name": "Struktur & Outline",
-                "icon": "📋",
-                "temperature": 0.2,
-                "system": "Kamu adalah Perancang Struktur Tulisan Akademik. Menggunakan hasil temuan Researcher dan konteks proyek, buatlah struktur outline laporan lengkap (Bab 1 Pendahuluan, Bab 2 Kajian Teori, Bab 3 Pembahasan/Analisis, Bab 4 Kesimpulan & Saran)."
-            },
-            {
-                "role": "Writer",
-                "name": "Penulis Makalah",
-                "icon": "✍️",
-                "temperature": 0.4,
-                "system": "Kamu adalah Penulis Akademik Ilmiah. Berdasarkan outline dari Planner dan rujukan Researcher, tuliskan draf pembahasan komprehensif dengan bahasa formal baku Indonesia (EYD), argumentasi logis, dan alur terstruktur."
-            },
-            {
-                "role": "Reviewer",
-                "name": "Reviewer & QA Akademik",
-                "icon": "🎯",
-                "temperature": 0.2,
-                "system": "Kamu adalah Dosen Reviewer Akademik. Evaluasi tulisan dari Penulis. Periksa konsistensi argumen, kejelasan bahasa, kelengkapan pembahasan, dan perbaiki bagian yang kurang tajam. Di baris paling akhir dari evaluasimu, berikan status kelayakan dalam format wajib:\nVERDICT: PASSED atau VERDICT: NEEDS_REVISION\nJika NEEDS_REVISION, sertakan catatan perbaikan spesifik."
-            }
-        ]
-    },
-    "dev": {
-        "id": "dev",
-        "title": "Mode Software & Web/App Dev",
-        "icon": "💻",
-        "description": "Pengembangan aplikasi dari arsitektur sistem, UI/UX, implementasi kode multi-file, hingga security & QA loop.",
-        "stages": [
-            {
-                "role": "Architect",
-                "name": "System Architect",
-                "icon": "📐",
-                "temperature": 0.1,
-                "system": "Kamu adalah Principal System Architect. Rancang arsitektur sistem untuk kebutuhan fitur berikut. Ikuti spesifikasi arsitektur proyek (AGENTS.md) jika ada. Tentukan entity relationship/schema database, struktur tabel, nama file yang akan dibuat/diubah, dan pola endpoint API."
-            },
-            {
-                "role": "UI/UX",
-                "name": "UI/UX Specialist",
-                "icon": "🎨",
-                "temperature": 0.4,
-                "system": "Kamu adalah Senior UI/UX Specialist. Berdasarkan spesifikasi arsitektur, buat wireframe tata letak layar (screen layout), alur navigasi pengguna (user flow), daftar komponen interaktif, dan panduan styling yang jelas."
-            },
-            {
-                "role": "Coder",
-                "name": "Lead Developer",
-                "icon": "⚡",
-                "temperature": 0.1,
-                "system": "Kamu adalah Lead Full-Stack Developer handal. Tulis kode implementasi produksi yang bersih, modular, dan lengkap (backend/frontend) sesuai instruksi Architect dan UI/UX sebelumnya. Tanpa placeholder malas (tulis kode nyata).\n\nPENTING: Setiap file kode yang kamu buat/ubah WAJIB ditulis dengan header format multi-file terpisah berikut:\n### FILE: path/to/file.ext\n```ext\n// kode lengkap di sini\n```\nContoh:\n### FILE: lib/services/auth_service.dart\n```dart\n// kode\n```"
-            },
-            {
-                "role": "QA",
-                "name": "QA & Security Engineer",
-                "icon": "🛡️",
-                "temperature": 0.1,
-                "system": "Kamu adalah Senior QA & Security Engineer. Audit kode dari Coder. Cari celah keamanan, race condition, error penanganan null, dan edge case. Periksa apakah kode sesuai dengan struktur proyek.\n\nPENTING: Di baris paling akhir dari evaluasimu, WAJIB tuliskan satu baris penutup status:\nVERDICT: PASSED atau VERDICT: NEEDS_REVISION\nJika NEEDS_REVISION, sertakan daftar ringkas poin bug yang wajib diperbaiki."
-            }
-        ]
-    },
-    "security": {
-        "id": "security",
-        "title": "Mode Audit & Security Fix",
-        "icon": "🛡️",
-        "description": "Audit celah keamanan kode (injection, race condition, token leakage) dan patch kode perbaikan tanpa tahap UI/UX.",
-        "stages": [
-            {
-                "role": "Security",
-                "name": "Security Auditor",
-                "icon": "🔍",
-                "temperature": 0.1,
-                "system": "Kamu adalah Senior Application Security Auditor & Penetration Tester. Analisis codebase target secara mendalam: periksa celah OWASP, SQL Injection, Auth Bypass, Broken Access Control / IDOR, Race Condition, Token Leakage, dan penanganan input yang tidak aman. Sajikan laporan audit terstruktur: Lokasi file/line, tingkat keparahan (Critical/High/Medium), bukti celah, dan rekomendasi mitigasi teknis yang konkret. DILARANG keras memanggil tool, format XML DSML, atau sintaks perintah bash."
-            },
-            {
-                "role": "Coder",
-                "name": "Security Patch Developer",
-                "icon": "🔧",
-                "temperature": 0.1,
-                "system": "Kamu adalah Senior Security Engineer & Backend Specialist. Berdasarkan temuan Security Auditor sebelumnya, tuliskan implementasi kode perbaikan (security patch / hardening) yang bersih, modular, dan aman. Tanpa placeholder malas.\n\nPENTING: Setiap file kode yang kamu buat/ubah WAJIB ditulis dengan header format multi-file terpisah berikut:\n### FILE: path/to/file.ext\n```ext\n// kode perbaikan lengkap di sini\n```"
-            },
-            {
-                "role": "QA",
-                "name": "Verification QA",
-                "icon": "🛡️",
-                "temperature": 0.1,
-                "system": "Kamu adalah QA Lead. Verifikasi kode perbaikan dari Security Patch Developer. Pastikan semua celah yang dilaporkan telah tertutup sempurna tanpa merusak fungsionalitas sistem yang sudah ada.\n\nPENTING: Di baris paling akhir dari evaluasimu, WAJIB tuliskan satu baris penutup status:\nVERDICT: PASSED atau VERDICT: NEEDS_REVISION\nJika NEEDS_REVISION, sertakan daftar celah yang belum tertutup."
-            }
-        ]
-    }
-}
 
 tasks_store: Dict[str, Dict[str, Any]] = {}
 WORKSTATION_SESSIONS_FILE = os.path.join(BASE_DIR, "sessions.json")
@@ -749,14 +502,21 @@ SNAPSHOTS_DIR = os.path.join(BASE_DIR, ".snapshots")
 os.makedirs(SNAPSHOTS_DIR, exist_ok=True)
 
 def load_tasks():
+    """SQLite is the source of truth. tasks.json is read once, to migrate legacy state."""
     global tasks_store
-    if os.path.exists(TASKS_FILE):
-        try:
-            with open(TASKS_FILE, "r", encoding="utf-8") as f:
-                tasks_store = json.load(f)
-        except Exception as e:
-            print(f"Error loading tasks: {e}")
-            tasks_store = {}
+    store.init_db()
+    tasks_store = store.load_tasks()
+    if not tasks_store and os.path.exists(TASKS_FILE):
+        migrated = store.import_tasks_from_json(TASKS_FILE)
+        if migrated:
+            tasks_store = migrated
+            store.save_tasks(tasks_store)
+            print(f"Migration: {len(tasks_store)} tasks imported from tasks.json -> SQLite")
+    # restart reconciliation: tasks whose worker died become 'interrupted'
+    recovered = store.reconcile_interrupted(tasks_store)
+    if recovered:
+        print(f"Reconciliation: {len(recovered)} task(s) marked interrupted: {', '.join(recovered)}")
+    return recovered
 
 def _atomic_write_json(file_path: str, data: Any):
     tmp_path = f"{file_path}.{uuid.uuid4().hex}.tmp"
@@ -766,9 +526,20 @@ def _atomic_write_json(file_path: str, data: Any):
 
 def save_tasks():
     try:
-        _atomic_write_json(TASKS_FILE, tasks_store)
+        store.save_tasks(tasks_store)          # source of truth
+        store.export_tasks_json(tasks_store)   # JSON_BACKUP: delete this line to drop JSON state
     except Exception as e:
         print(f"Error saving tasks: {e}")
+
+def save_single_task(task_id: str):
+    task = tasks_store.get(task_id)
+    if not task:
+        return
+    try:
+        store.save_task(task)                  # single-row upsert, avoids O(N*S) write churn
+        store.export_tasks_json(tasks_store)   # JSON_BACKUP: delete this line to drop JSON state
+    except Exception as e:
+        print(f"Error saving task {task_id}: {e}")
 
 load_tasks()
 
@@ -1103,30 +874,83 @@ async def call_llm(system_prompt: str, user_content: str, temperature: float = 0
 
     return full_content
 
+
+class ContextLog:
+    """Structured context model: ordered typed entries instead of one growing string.
+
+    Static context (working dir, repo map, rules, skills, goal, notes) is stored
+    inline; stage outputs are stored as references (no duplication) and resolved
+    at render time. Entries are mirrored into task["context_model"] so the
+    structure survives a restart. render() reproduces the legacy prompt string
+    byte for byte.
+    """
+
+    def __init__(self, task: Dict[str, Any], entries: Optional[List[Dict[str, Any]]] = None):
+        self.task = task
+        self.entries: List[Dict[str, Any]] = list(entries or [])
+        task["context_model"] = self.entries
+
+    def _commit(self) -> None:
+        self.task["context_model"] = self.entries
+
+    def add(self, kind: str, content: str) -> None:
+        self.entries.append({"kind": kind, "content": content})
+        self._commit()
+
+    def add_stage_output(self, stage_idx: int) -> None:
+        self.entries.append({"kind": "stage_output", "stage_idx": stage_idx})
+        self._commit()
+
+    def add_stage_bypass(self, stage_idx: int, reason: str) -> None:
+        self.entries.append({"kind": "stage_bypassed", "stage_idx": stage_idx, "reason": reason})
+        self._commit()
+
+    @staticmethod
+    def _stage_ref_text(stage: Dict[str, Any], entry: Dict[str, Any]) -> str:
+        role, name = stage.get("role", ""), stage.get("name", "")
+        if entry["kind"] == "stage_output":
+            return f"=== HASIL DARI [{role} - {name}] ===\n{stage.get('output') or ''}\n\n"
+        return (f"=== [{role} - {name}] DILEWATI (OUT OF SCOPE) ===\n"
+                f"{entry.get('reason') or 'Tugas di luar domain peran ini.'}\n\n")
+
+    def render(self) -> str:
+        parts: List[str] = []
+        stages = self.task.get("stages") or []
+        for entry in self.entries:
+            if "content" in entry:
+                parts.append(entry["content"])
+                continue
+            idx = entry.get("stage_idx", -1)
+            if 0 <= idx < len(stages):
+                parts.append(self._stage_ref_text(stages[idx], entry))
+        return "".join(parts)
+
+
 async def execute_pipeline(task_id: str):
     task = tasks_store.get(task_id)
     if not task:
         return
     task["status"] = "running"
     task["started_at"] = time.time()
-    save_tasks()
+    save_single_task(task_id)
+    store.add_event(task_id, "task.started", {"preset": task.get("preset_id")})
 
-    context_chain = ""
+    ctx = ContextLog(task)
     wdir = None
     if task.get("working_directory"):
         try:
             wdir = sanitize_path(task["working_directory"])
-            context_chain += f"=== WORKING DIRECTORY: {wdir} ===\n"
+            ctx.add("working_directory", f"=== WORKING DIRECTORY: {wdir} ===\n")
             
             # Auto-inject codebase skeleton / repo map
             repo_map = generate_repo_map(wdir)
             if repo_map:
-                context_chain += f"=== EXISTING REPOSITORY SKELETON (CODEBASE) ===\n{repo_map}\n\n"
+                ctx.add("repo_map", f"=== EXISTING REPOSITORY SKELETON (CODEBASE) ===\n{repo_map}\n\n")
         except Exception:
             pass
 
     if task.get("project_context"):
-        context_chain += f"=== PROJECT RULES & CONTEXT (AGENTS.md) ===\n{task['project_context']}\n\n"
+        ctx.add("project_rules", f"=== PROJECT RULES & CONTEXT (AGENTS.md) ===\n{task['project_context']}\n\n")
     
     # Auto-inject Hermes Skills SOPs
     if task.get("skills"):
@@ -1136,9 +960,9 @@ async def execute_pipeline(task_id: str):
             if content:
                 skills_context += f"--- HERMES SKILL SOP: {sk} ---\n{content}\n\n"
         if skills_context:
-            context_chain += f"=== ACTIVE HERMES SKILLS / GUIDELINES ===\n{skills_context}\n"
+            ctx.add("skills", f"=== ACTIVE HERMES SKILLS / GUIDELINES ===\n{skills_context}\n")
 
-    context_chain += f"=== TARGET TUGAS / GOAL ===\n{task['prompt']}\n\n"
+    ctx.add("goal", f"=== TARGET TUGAS / GOAL ===\n{task['prompt']}\n\n")
 
     # Auto-inject previous session turn context if session exists
     s_id = task.get("session_id")
@@ -1149,14 +973,14 @@ async def execute_pipeline(task_id: str):
                 prev_t = tasks_store[tid]
                 if prev_t.get("status") == "completed" and prev_t.get("final_output"):
                     prev_files = [f["path"] for f in prev_t.get("extracted_files", [])]
-                    context_chain += (
+                    ctx.add("previous_turn", (
                         f"=== PREVIOUS SESSION TURN CONTEXT (MULTI-TURN ITERATION) ===\n"
                         f"- Sesi Proyek: {workstation_sessions_store[s_id].get('title', 'Project Session')}\n"
                         f"- Tugas Sebelumnya: {prev_t.get('title', '')}\n"
                         f"- Ringkasan Deliverable Sebelumnya:\n{prev_t['final_output'][:1500]}\n"
                         f"- File yang Dihasilkan Sebelumnya: {', '.join(prev_files) or 'None'}\n"
                         f"=== END OF PREVIOUS TURN ===\n\n"
-                    )
+                    ))
                     break
 
     try:
@@ -1174,7 +998,8 @@ async def execute_pipeline(task_id: str):
 
             stage["status"] = "running"
             stage["started_at"] = time.time()
-            save_tasks()
+            save_single_task(task_id)
+            store.add_event(task_id, "stage.started", {"index": idx, "role": stage.get("role")})
 
             boundary_note = ""
             jobdesk_note = ""
@@ -1206,7 +1031,7 @@ async def execute_pipeline(task_id: str):
                 )
 
             user_msg = (
-                f"{context_chain}\n"
+                f"{ctx.render()}\n"
                 f"{boundary_note}\n"
                 f"{jobdesk_note}\n"
                 f"Tugas kamu sekarang sebagai [{stage['role']} - {stage['name']}]:\n"
@@ -1228,11 +1053,17 @@ async def execute_pipeline(task_id: str):
                             reason_line = line.strip()
                             break
                     # Context isolation: isolate from subsequent stages
-                    context_chain += f"=== [{stage['role']} - {stage['name']}] DILEWATI (OUT OF SCOPE) ===\n{reason_line or 'Tugas di luar domain peran ini.'}\n\n"
+                    ctx.add_stage_bypass(idx, reason_line or 'Tugas di luar domain peran ini.')
+                    store.add_event(task_id, "stage.bypassed", {"index": idx, "role": stage.get("role")})
+                    store.add_message(task_id, stage.get("role") or "agent", "stage_bypassed",
+                                      reason_line or 'Tugas di luar domain peran ini.', stage_idx=idx)
                 else:
                     stage["status"] = "completed"
                     stage["completed_at"] = time.time()
-                    context_chain += f"=== HASIL DARI [{stage['role']} - {stage['name']}] ===\n{output}\n\n"
+                    ctx.add_stage_output(idx)
+                    store.add_event(task_id, "stage.completed", {"index": idx, "role": stage.get("role")})
+                    store.add_message(task_id, stage.get("role") or "agent", "stage_output",
+                                      output, stage_idx=idx)
             except Exception as e:
                 err_type = type(e).__name__
                 raw_err = str(e).strip()
@@ -1257,27 +1088,30 @@ async def execute_pipeline(task_id: str):
                 task["status"] = "failed"
                 task["error"] = f"Gagal pada tahap [{stage['name']}]: {err_detail}"
                 task["completed_at"] = time.time()
-                save_tasks()
+                save_single_task(task_id)
+                store.add_event(task_id, "stage.failed", {"index": idx, "role": stage.get("role"),
+                                                          "error": err_detail})
+                store.add_event(task_id, "task.failed", {"error": task.get("error")})
                 return
 
-            save_tasks()
+            save_single_task(task_id)
 
             # --- DYNAMIC ORCHESTRATION & FAST-BYPASS ---
             if stage["role"] == "Orchestrator":
                 dynamic_stages, scope_matrix = parse_orchestrator_plan(output)
                 if scope_matrix:
                     task["scope_matrix"] = scope_matrix
-                    context_chain += (
+                    ctx.add("scope_matrix", (
                         f"=== SCOPE MATRIX & EXECUTION BOUNDARIES (ENFORCED BY ORCHESTRATOR) ===\n"
                         f"- Target Scope: {scope_matrix.get('target_scope', 'Sesuai prompt')}\n"
                         f"- Allowed Files: {', '.join(scope_matrix.get('allowed_files', [])) or 'File relevan'}\n"
                         f"- Forbidden Files: {', '.join(scope_matrix.get('forbidden_files', [])) or 'None'}\n"
-                    )
+                    ))
                     if scope_matrix.get("role_boundaries"):
-                        context_chain += "- Role Boundaries:\n"
+                        ctx.add("scope_matrix", "- Role Boundaries:\n")
                         for rb_k, rb_v in scope_matrix["role_boundaries"].items():
-                            context_chain += f"  * {rb_k}: {rb_v}\n"
-                    context_chain += "\n"
+                            ctx.add("scope_matrix", f"  * {rb_k}: {rb_v}\n")
+                    ctx.add("scope_matrix", "\n")
 
                     bypassed_roles = [r.lower().strip() for r in scope_matrix.get("bypassed_roles", [])]
                     selected_roles = [r.lower().strip() for r in scope_matrix.get("selected_roles", [])]
@@ -1331,7 +1165,7 @@ async def execute_pipeline(task_id: str):
                         })
                         existing_roles.append(spec["role"].lower())
 
-                save_tasks()
+                save_single_task(task_id)
 
             # --- HUMAN APPROVAL GATE ---
             # If enabled and current stage is Orchestrator, Architect or Planner, pause for human steering
@@ -1339,7 +1173,9 @@ async def execute_pipeline(task_id: str):
                 task["status"] = "waiting_approval"
                 task["waiting_stage_index"] = idx
                 task["waiting_stage_name"] = stage["name"]
-                save_tasks()
+                save_single_task(task_id)
+                store.add_event(task_id, "approval.requested",
+                                {"index": idx, "role": stage.get("role"), "name": stage.get("name")})
 
                 event = asyncio.Event()
                 APPROVAL_EVENTS[task_id] = event
@@ -1355,9 +1191,10 @@ async def execute_pipeline(task_id: str):
                 
                 # If human gave feedback during approval, inject into context
                 if task.get("latest_feedback"):
-                    context_chain += f"=== HUMAN SUPERVISOR FEEDBACK & DIRECTIVES ===\n{task['latest_feedback']}\n\n"
+                    ctx.add("human_feedback", f"=== HUMAN SUPERVISOR FEEDBACK & DIRECTIVES ===\n{task['latest_feedback']}\n\n")
                     task["latest_feedback"] = None
-                save_tasks()
+                store.add_event(task_id, "approval.granted", {"index": idx})
+                save_single_task(task_id)
 
             # --- AUTO-FIX / VERIFICATION LOOP ---
             # If QA stage returns VERDICT: NEEDS_REVISION, loop back to Coder
@@ -1389,20 +1226,23 @@ async def execute_pipeline(task_id: str):
                     }
                     task["stages"].append(fix_stage)
                     task["stages"].append(qa_re_stage)
-                    save_tasks()
+                    save_single_task(task_id)
+                    store.add_event(task_id, "task.auto_fix", {"cycle": task["current_fix_loop"]})
 
             idx += 1
 
         if task.get("cancelled"):
             task["status"] = "cancelled"
             task["completed_at"] = time.time()
-            task["final_output"] = context_chain
-            save_tasks()
+            task["final_output"] = ctx.render()
+            save_single_task(task_id)
+            store.add_event(task_id, "task.cancelled", {})
             return
 
         task["status"] = "completed"
         task["completed_at"] = time.time()
-        task["final_output"] = context_chain
+        task["final_output"] = ctx.render()
+        store.add_event(task_id, "task.completed", {"stages": len(task.get("stages") or [])})
 
         # Extract multi-file blocks prioritizing Coder/Fixer outputs to avoid QA comments polluting code
         code_producing_roles = {"coder", "auto-fixer", "developer", "lead developer"}
@@ -1410,7 +1250,7 @@ async def execute_pipeline(task_id: str):
             s.get("output", "") for s in task.get("stages", [])
             if s.get("status") == "completed" and any(r in s.get("role", "").lower() or r in s.get("name", "").lower() for r in code_producing_roles)
         ]
-        text_for_extraction = "\n\n".join(coder_outputs) if coder_outputs else context_chain
+        text_for_extraction = "\n\n".join(coder_outputs) if coder_outputs else ctx.render()
         extracted = extract_code_files(text_for_extraction, scope_matrix=task.get("scope_matrix"))
         task["extracted_files"] = extracted
 
@@ -1454,7 +1294,7 @@ async def execute_pipeline(task_id: str):
                     artifact_name = f"DELIVERABLE_{task_id}.md"
                     artifact_path = sanitize_path(os.path.join(wdir, artifact_name), base_dir=wdir)
                     with open(artifact_path, "w", encoding="utf-8") as f:
-                        f.write(context_chain)
+                        f.write(ctx.render())
                     task["saved_artifact_path"] = artifact_path
             except Exception as e:
                 task["saved_artifact_error"] = str(e)
@@ -1462,8 +1302,9 @@ async def execute_pipeline(task_id: str):
     except Exception as e:
         task["status"] = "error"
         task["error"] = str(e)
+        store.add_event(task_id, "task.error", {"error": str(e)})
     finally:
-        save_tasks()
+        save_single_task(task_id)
 
 @app.get("/api/presets")
 async def get_presets():
@@ -1863,6 +1704,8 @@ async def create_task(req: TaskCreateRequest):
         save_workstation_sessions()
     save_tasks()
 
+    store.add_event(task_id, "task.created", {"title": task["title"], "preset": req.preset_id,
+                                              "stages": len(stages)})
     asyncio.create_task(execute_pipeline(task_id))
     return task
 
@@ -1882,7 +1725,9 @@ async def approve_task_stage(task_id: str, req: TaskApproveRequest):
     if req.action == "reject":
         task["cancelled"] = True
         task["status"] = "cancelled"
+        store.add_event(task_id, "approval.rejected", {"feedback": req.feedback})
     else:
+        store.add_event(task_id, "approval.resumed", {"index": task.get("waiting_stage_index")})
         stage_idx = str(task.get("waiting_stage_index", 0))
         task.setdefault("stages_approved", {})[stage_idx] = True
         if req.feedback:
@@ -2372,6 +2217,208 @@ async def serve_index():
         with open(index_path, "r", encoding="utf-8") as f:
             return f.read()
     return "<h1>AI Team Dashboard is initializing...</h1>"
+
+
+# ============================================================================
+# PHASE 2 — Level 1 Chat (User ↔ Hermes, streaming SSE)
+# ============================================================================
+
+class ChatRequest(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+    workspace_root: Optional[str] = None
+    model: Optional[str] = None
+    skills: Optional[List[str]] = None
+
+
+@app.get("/api/chat/sessions")
+def api_chat_sessions():
+    return {"sessions": store.list_chat_sessions()}
+
+
+@app.post("/api/chat/sessions")
+def api_chat_session_create(req: dict):
+    title = (req.get("title") or "New Chat").strip()
+    ws = req.get("workspace_root")
+    model = req.get("model")
+    sid = store.create_chat_session(title, workspace_root=ws, model=model)
+    return {"session": store.get_chat_session(sid)}
+
+
+@app.get("/api/chat/sessions/{session_id}/messages")
+def api_chat_session_messages(session_id: str, limit: int = 100):
+    return {"messages": store.list_chat_messages(session_id, limit=limit)}
+
+
+@app.delete("/api/chat/sessions/{session_id}")
+def api_chat_session_delete(session_id: str):
+    ok = store.delete_chat_session(session_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Sesi chat tidak ditemukan.")
+    return {"status": "ok"}
+
+
+def _build_chat_system_prompt(workspace_root: Optional[str], skills: Optional[List[str]]) -> str:
+    """Build a system prompt that includes workspace context + skills, like the task pipeline does."""
+    parts = [
+        "Kamu adalah Hermes, asisten AI umum yang bisa membantu coding, kuliah, riset, "
+        "analisis data, menulis, brainstorming, dan tugas apapun. "
+        "Jawab dengan bahasa yang sesuai pertanyaan user (Bahasa Indonesia atau English). "
+        "Gunakan markdown untuk format respons."
+    ]
+
+    if workspace_root:
+        try:
+            ws_path = sanitize_path(workspace_root)
+            if os.path.isdir(ws_path):
+                repo_map = generate_repo_map(ws_path)
+                if repo_map:
+                    parts.append(f"\n=== WORKSPACE: {ws_path} ===\n{repo_map}")
+                # Inject AGENTS.md / README.md if present
+                for ctx_file in ("AGENTS.md", "README.md"):
+                    ctx_path = os.path.join(ws_path, ctx_file)
+                    if os.path.exists(ctx_path):
+                        try:
+                            with open(ctx_path, "r", encoding="utf-8", errors="ignore") as f:
+                                ctx_content = f.read(8000)
+                            parts.append(f"\n=== {ctx_file} ===\n{ctx_content}")
+                        except Exception:
+                            pass
+                        break
+        except Exception:
+            pass
+
+    if skills:
+        for sk in skills:
+            content = read_skill_content(sk)
+            if content:
+                parts.append(f"\n=== HERMES SKILL: {sk} ===\n{content[:3000]}")
+
+    return "\n".join(parts)
+
+
+async def _stream_chat_llm(messages: List[Dict[str, str]], model: Optional[str] = None,
+                            temperature: float = 0.3):
+    """Async generator that yields SSE `data: …` lines with incremental content chunks."""
+    base_url, default_model, key = get_llm_config()
+    use_model = model or default_model
+
+    url = f"{base_url}/chat/completions"
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
+    payload = {
+        "model": use_model,
+        "messages": messages,
+        "temperature": max(0.0, min(1.0, float(temperature))),
+        "stream": True,
+    }
+
+    timeout = httpx.Timeout(180.0, connect=15.0)
+    full_content: List[str] = []
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream("POST", url, headers=headers, json=payload) as res:
+                if res.status_code != 200:
+                    body = await res.aread()
+                    err = f"LLM HTTP {res.status_code}: {body.decode(errors='ignore')[:300]}"
+                    yield f"data: {json.dumps({'error': err})}\n\n"
+                    return
+
+                async for line in res.aiter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data_str = line[6:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                        delta = chunk["choices"][0]["delta"]
+                        c = delta.get("content")
+                        if c:
+                            full_content.append(c)
+                            yield f"data: {json.dumps({'chunk': c})}\n\n"
+                    except Exception:
+                        pass
+    except Exception as e:
+        yield f"data: {json.dumps({'error': str(e)[:300]})}\n\n"
+
+    final = "".join(full_content).strip()
+    yield f"data: {json.dumps({'done': True, 'full_content': final, 'model': use_model})}\n\n"
+
+
+@app.post("/api/chat")
+async def api_chat(req: ChatRequest):
+    """Streaming chat endpoint. Returns text/event-stream with incremental chunks.
+
+    Uses POST (not GET) so we can send message + context. The browser must use
+    fetch() + ReadableStream to consume SSE from a POST — native EventSource is
+    GET-only and will not be used.
+    """
+    if not req.message.strip():
+        raise HTTPException(status_code=400, detail="Pesan kosong.")
+
+    # Resolve or create chat session
+    session_id = req.session_id
+    if session_id:
+        sess = store.get_chat_session(session_id)
+        if not sess:
+            raise HTTPException(status_code=404, detail="Sesi chat tidak ditemukan.")
+    else:
+        title = req.message.strip()[:60]
+        session_id = store.create_chat_session(
+            title, workspace_root=req.workspace_root, model=req.model
+        )
+
+    # Session-level model override: request > session > global
+    sess = store.get_chat_session(session_id) or {}
+    model_override = req.model or sess.get("model") or None
+
+    # Persist user message
+    store.add_chat_message(session_id, "user", req.message.strip())
+
+    # Build system prompt with workspace + skills context
+    ws_root = req.workspace_root or sess.get("workspace_root")
+    system_prompt = _build_chat_system_prompt(ws_root, req.skills)
+
+    # Build messages array: system + recent history + new user message
+    history = store.get_recent_chat_context(session_id, n_turns=20)
+    llm_messages = [{"role": "system", "content": system_prompt}] + history
+
+    async def event_generator():
+        collected: List[str] = []
+        used_model = model_override
+
+        async for sse_line in _stream_chat_llm(llm_messages, model=model_override):
+            yield sse_line
+            # Parse final 'done' or 'error' event to persist assistant message
+            try:
+                raw_data = sse_line[6:].strip() if sse_line.startswith("data: ") else sse_line.strip()
+                payload = json.loads(raw_data)
+                if payload.get("done"):
+                    collected_text = payload.get("full_content", "")
+                    used_model = payload.get("model")
+                    if collected_text:
+                        store.add_chat_message(session_id, "assistant", collected_text, model=used_model)
+                elif payload.get("error"):
+                    err_msg = f"[Error: {payload.get('error')}]"
+                    store.add_chat_message(session_id, "assistant", err_msg, model=used_model)
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "X-Chat-Session-Id": session_id,
+        },
+    )
+
+# Phase 1 boot: seed workspace registry from config presets (runs after all defs)
+_seeded_workspaces = store.seed_workspaces(get_workspace_presets(), DEFAULT_WORKSPACE)
+if _seeded_workspaces:
+    print(f"Workspace registry: {_seeded_workspaces} workspace(s) seeded")
 
 if __name__ == "__main__":
     # Local launcher (setup.sh). The systemd unit passes its own --host/--port.

@@ -9,3 +9,5 @@ DELIVERABLE_*.md
 .DS_Store
 .env
 .model_override
+venv/
+*.db
