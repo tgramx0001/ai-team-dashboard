@@ -82,7 +82,7 @@ class TestCrossPlatformSupport(unittest.TestCase):
         mock_proc.pid = 99999
         mock_proc.returncode = None
 
-        with patch("main.IS_WINDOWS", False), \
+        with patch("security_utils.IS_WINDOWS", False), \
              patch("os.killpg") as mock_killpg, \
              patch("os.getpgid", return_value=99999):
             asyncio.run(main._kill_process_tree(mock_proc))
@@ -94,7 +94,7 @@ class TestCrossPlatformSupport(unittest.TestCase):
         mock_proc.pid = 88888
         mock_proc.returncode = None
 
-        with patch("main.IS_WINDOWS", True), \
+        with patch("security_utils.IS_WINDOWS", True), \
              patch("asyncio.create_subprocess_exec") as mock_exec:
             mock_kill_task = MagicMock()
             mock_kill_task.wait = MagicMock(return_value=asyncio.sleep(0.01))

@@ -2333,6 +2333,52 @@
       }
     }
 
+    // ---- Interactive terminal over WebSocket (PTY session per run) ----------
+    let terminalWS = null;
+    let terminalWSReady = false;
+    let terminalWSBlock = null;    // div receiving live output snapshots
+    let terminalWSActive = false;  // a run is currently in flight
+    let terminalWSLastCmd = '';
+
+    function connectTerminalWS() {
+      if (terminalWS && (terminalWS.readyState === WebSocket.CONNECTING || terminalWS.readyState === WebSocket.OPEN)) return;
+      let token = '';
+      try { token = localStorage.getItem(AI_TEAM_AUTH_KEY) || ''; } catch (e) {}
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      terminalWSReady = false;
+      let ws;
+      try { ws = new WebSocket(proto + '//' + location.host + '/api/workspace/terminal/ws'); } catch (e) { return; }
+      terminalWS = ws;
+      ws.onopen = () => { try { ws.send(JSON.stringify({ type: 'auth', token })); } catch (e) {} };
+      ws.onmessage = (ev) => {
+        let msg; try { msg = JSON.parse(ev.data); } catch (e) { return; }
+        if (msg.type === 'ready') { terminalWSReady = true; return; }
+        if (msg.type === 'output') {
+          if (terminalWSBlock) {
+            terminalWSBlock.innerText = msg.text;
+            const box = document.getElementById('drawerTerminalLogs');
+            if (box) box.scrollTop = box.scrollHeight;
+          }
+          return;
+        }
+        if (msg.type === 'exit') {
+          appendMiniTerminal((msg.code === 0 ? '\u2713' : '\u2715') + ` [Exit: ${msg.code} | ${msg.duration_ms}ms]`);
+          terminalWSActive = false;
+          terminalWSBlock = null;
+          if ((terminalWSLastCmd || '').startsWith('git ')) fetchDrawerGitStatus();
+          return;
+        }
+        if (msg.type === 'error') {
+          appendMiniTerminal('\u2715 ' + (msg.detail || 'terminal error'));
+          terminalWSActive = false;
+          terminalWSBlock = null;
+          return;
+        }
+      };
+      ws.onclose = () => { terminalWSReady = false; terminalWSActive = false; terminalWS = null; terminalWSBlock = null; };
+      ws.onerror = () => {};
+    }
+
     async function executeDrawerTerminal() {
       const input = document.getElementById('drawerTerminalInput');
       if (!input) return;
@@ -2344,6 +2390,35 @@
       input.value = '';
 
       appendMiniTerminal(`$ ${cmd}`);
+      terminalWSLastCmd = cmd;
+      connectTerminalWS();
+
+      // Interactive path: PTY session over WebSocket. While a run is in flight,
+      // Enter forwards the line as stdin (answers prompts like `read`/`[y/N]`).
+      if (terminalWS && terminalWS.readyState === WebSocket.OPEN && terminalWSReady) {
+        if (terminalWSActive) {
+          terminalWS.send(JSON.stringify({ type: 'input', data: cmd + '\n' }));
+          return;
+        }
+        terminalWSActive = true;
+        const box = document.getElementById('drawerTerminalLogs');
+        if (box) {
+          terminalWSBlock = document.createElement('div');
+          terminalWSBlock.className = 'text-[#d0d6e0]';
+          terminalWSBlock.innerText = '';
+          box.appendChild(terminalWSBlock);
+          box.scrollTop = box.scrollHeight;
+        }
+        try {
+          terminalWS.send(JSON.stringify({ type: 'run', command: cmd, path: currentWorkspace, timeout: 60 }));
+        } catch (e) {
+          terminalWSActive = false;
+          terminalWSBlock = null;
+        }
+        return;
+      }
+
+      // Fallback: plain HTTP request (WS not ready / not connected)
       try {
         const res = await fetch('/api/workspace/terminal', {
           method: 'POST',

@@ -1,11 +1,11 @@
 """Durable state for AI Team Dashboard.
 
 SQLite is the SOURCE OF TRUTH for workspaces, agents, tasks, stages, messages
-and events. `tasks.json` is only a temporary write-through backup kept during
-the migration (see export_tasks_json / import_tasks_from_json and the
-JSON_BACKUP markers in main.py). Removal point: delete export_tasks_json()
-call sites + JSON_BACKUP_PATH usage and the JSON state is gone; the DB alone
-still holds everything.
+and events. The legacy `tasks.json` migration is complete: the write-through
+mirror (export_tasks_json) was removed and nothing writes JSON state anymore.
+tasks.json is read once at startup by import_tasks_from_json() as a one-time
+migration, after which the DB alone holds everything. Explicit JSON dumps are
+available on demand via GET /api/tasks/export.
 
 No framework, stdlib sqlite3 only.
 """
@@ -428,19 +428,11 @@ def reconcile_interrupted(tasks: Dict[str, Dict[str, Any]]) -> List[str]:
     return changed
 
 
-# ---------------------------------------------------------------- JSON backup (temporary)
-
-def export_tasks_json(tasks: Dict[str, Dict[str, Any]], path: Optional[str] = None) -> None:
-    """JSON_BACKUP: write-through mirror of the DB. DELETE THIS to drop JSON state."""
-    target = path or JSON_BACKUP_PATH
-    tmp = f"{target}.{uuid.uuid4().hex}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(tasks, f, indent=2, ensure_ascii=False)
-    os.replace(tmp, target)
-
+# ---------------------------------------------------------------- legacy JSON migration (read-only)
 
 def import_tasks_from_json(path: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
-    """One-time migration: read legacy tasks.json into memory (caller persists to DB)."""
+    """One-time migration: read legacy tasks.json into memory (caller persists to DB).
+    JSON write-through mirror was removed; SQLite is the sole writer now."""
     source = path or JSON_BACKUP_PATH
     if not os.path.exists(source):
         return {}

@@ -1,6 +1,7 @@
 import asyncio
 import difflib
 import fnmatch
+import functools
 import glob
 import hmac
 import json
@@ -12,9 +13,11 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import uuid
 import yaml
+from contextlib import contextmanager
 from pathlib import Path
 
 import store
@@ -50,26 +53,71 @@ def _load_env_file(path: str) -> None:
 
 _load_env_file(os.path.join(BASE_DIR, ".env"))
 
-def _split_paths(raw: str) -> List[str]:
-    """Parse a path list from env (comma/semicolon separated), expand ~ and $VARS."""
-    out: List[str] = []
-    for part in raw.replace(";", ",").split(","):
-        part = part.strip()
-        if part:
-            out.append(os.path.abspath(os.path.expandvars(os.path.expanduser(part))))
-    return out
+# Workspace boundary + terminal security primitives live in security_utils so
+# route modules can import them without circular imports (main re-exports the
+# same names for backwards compatibility with tests and internal callers).
+from security_utils import (          # noqa: E402
+    ALLOWED_ROOT,
+    ALLOWED_ROOTS,
+    DEFAULT_WORKSPACE,
+    EXTRA_ROOTS,
+    IS_WINDOWS,
+    _clean_terminal_env,
+    _env_paths,
+    _kill_process_tree,
+    _mask_sensitive_text,
+    _split_paths,
+    sanitize_path,
+)
 
-def _env_paths(key: str, default: str) -> List[str]:
-    raw = os.environ[key] if key in os.environ else default
-    return _split_paths(raw)
+# --- Per-workspace write serialization (#5) ----------------------------------
+# Guarantees in-process ordering for mutating file operations (drawer CRUD,
+# apply-files, pipeline auto-apply) so concurrent handlers cannot interleave
+# backup/write/replace sequences for the same workspace directory.
+_ws_locks: Dict[str, threading.Lock] = {}
+_ws_locks_guard = threading.Lock()
 
-# Workspace boundary: primary root plus explicit extra roots (never the whole $HOME).
-ALLOWED_ROOT = os.path.abspath(os.path.expandvars(os.path.expanduser(
-    os.environ.get("WORKSPACE_ROOT", os.path.join(os.path.expanduser("~"), "projects"))
-)))
-EXTRA_ROOTS = _env_paths("WORKSPACE_EXTRA_ROOTS", os.path.join(os.path.expanduser("~"), "Documents"))
-ALLOWED_ROOTS = [ALLOWED_ROOT] + [r for r in EXTRA_ROOTS if r != ALLOWED_ROOT]
-DEFAULT_WORKSPACE = os.environ.get("DEFAULT_WORKSPACE", ALLOWED_ROOT)
+
+@contextmanager
+def workspace_file_lock(path: str):
+    """Serialize mutating file operations per workspace directory (in-process).
+
+    ponytail: intra-process only. Terminal subprocesses and second server
+    processes are outside this lock; add fcntl.flock('.workspace.lock') when a
+    multi-process writer appears.
+    """
+    try:
+        key = os.path.normcase(os.path.realpath(path))
+    except Exception:
+        key = str(path)
+    with _ws_locks_guard:
+        lock = _ws_locks.setdefault(key, threading.Lock())
+    with lock:
+        yield
+
+
+def workspace_locked(arg_name: str = "path"):
+    """Decorator: resolve `req.<arg_name>` through sanitize_path, hold the
+    workspace file lock for the duration of the handler. Critical sections are
+    synchronous (no await inside), so a threading.Lock cannot deadlock the loop.
+    """
+    def deco(fn):
+        @functools.wraps(fn)
+        async def wrapper(req):
+            raw = getattr(req, arg_name, None)
+            key = None
+            if raw:
+                try:
+                    key = sanitize_path(raw)
+                except HTTPException:
+                    key = None
+            if key:
+                with workspace_file_lock(key):
+                    return await fn(req)
+            return await fn(req)
+        return wrapper
+    return deco
+
 AUTH_TOKEN = os.environ.get("AI_TEAM_AUTH_TOKEN", "").strip()
 LAN_HOST = os.environ.get("LAN_HOST", "")
 ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()] or [
@@ -531,8 +579,7 @@ def _atomic_write_json(file_path: str, data: Any):
 
 def save_tasks():
     try:
-        store.save_tasks(tasks_store)          # source of truth
-        store.export_tasks_json(tasks_store)   # JSON_BACKUP: delete this line to drop JSON state
+        store.save_tasks(tasks_store)          # SQLite is the single source of truth
     except Exception as e:
         print(f"Error saving tasks: {e}")
 
@@ -542,7 +589,6 @@ def save_single_task(task_id: str):
         return
     try:
         store.save_task(task)                  # single-row upsert, avoids O(N*S) write churn
-        store.export_tasks_json(tasks_store)   # JSON_BACKUP: delete this line to drop JSON state
     except Exception as e:
         print(f"Error saving task {task_id}: {e}")
 
@@ -595,25 +641,7 @@ def save_apply_snapshot(wdir: str, task_id: str, records: List[Dict[str, Any]], 
     except Exception as e:
         print(f"Error saving snapshot: {e}")
 
-def sanitize_path(path: str, base_dir: Optional[str] = None) -> str:
-    """Resolve `path` (symlinks included) and require it to stay inside the boundary.
-
-    Returns the fully resolved absolute path so callers never write through an
-    in-root symlink that points outside the workspace. With no base_dir the path
-    must stay inside any configured workspace root (primary or extra).
-    """
-    if "\x00" in path:
-        raise HTTPException(status_code=400, detail="Akses direktori di luar batas diizinkan.")
-    try:
-        resolved_path = Path(os.path.abspath(path.strip())).resolve()
-        roots = [Path(os.path.abspath(base_dir)).resolve()] if base_dir else [Path(r).resolve() for r in ALLOWED_ROOTS]
-        if not any(resolved_path == r or resolved_path.is_relative_to(r) for r in roots):
-            raise HTTPException(status_code=400, detail="Akses direktori di luar batas diizinkan.")
-    except HTTPException:
-        raise
-    except Exception:
-        raise HTTPException(status_code=400, detail="Akses direktori di luar batas diizinkan.")
-    return str(resolved_path)
+# sanitize_path() is imported from security_utils (single source of truth).
 
 def generate_repo_map(target_dir: str, max_files: int = 35) -> str:
     if not os.path.exists(target_dir) or not os.path.isdir(target_dir):
@@ -931,6 +959,84 @@ class ContextLog:
         return "".join(parts)
 
 
+SIGNAL_KINDS = {"QUESTION", "ANSWER", "FINDING", "REQUEST_CHANGE", "ARCHITECTURE_CONCERN",
+                "TEST_FAILED", "TEST_PASSED", "APPROVAL_REQUIRED", "APPROVED", "REJECTED", "BLOCKED"}
+
+
+def extract_stage_signals(output: str, from_role: str, known_roles: List[str]) -> List[Dict[str, Any]]:
+    """Deterministic collaborative-signal extraction (structured first, regex fallback).
+
+    Accepted formats, in priority order:
+      1. ```signals fence containing a JSON list of
+         {"type": "FINDING", "to": "Coder", "text": "..."} objects.
+      2. Inline markers: [SIGNAL type=QUESTION to=Coder] text on one line.
+      3. Legacy free-form line markers:  FINDING: ..., QUESTION ke X: ...,
+         ARCHITECTURE_CONCERN: ...  (only used when no structured signal matched).
+
+    Every target role is validated against `known_roles`; unknown or empty
+    targets broadcast to "all" so a mistyped role never silently drops a signal.
+    """
+    roles = {r.lower(): r for r in known_roles if r}
+    signals: List[Dict[str, Any]] = []
+
+    def _norm(kind: Any, to: Any, text: Any) -> Optional[Dict[str, str]]:
+        kind = str(kind or "").strip().upper()
+        kind = {"TEMUAN": "FINDING", "TANYA": "QUESTION"}.get(kind, kind)
+        if kind not in SIGNAL_KINDS:
+            return None
+        text = str(text or "").strip()
+        if not text:
+            return None
+        to_raw = str(to or "").strip()
+        if not to_raw or to_raw.lower() in ("all", "semua", "team", "tim"):
+            target = "all"
+        elif to_raw.lower() in roles:
+            target = roles[to_raw.lower()]
+        elif kind == "ARCHITECTURE_CONCERN" and "architect" in roles:
+            target = roles["architect"]
+        else:
+            target = "all"
+        return {"type": kind, "to": target, "text": text}
+
+    # 1) Structured JSON fence
+    m = re.search(r'```(?:signals|json)\s*(\[\s*\{.*?\}\s*\])\s*```', output, re.DOTALL | re.IGNORECASE)
+    if m:
+        try:
+            for item in json.loads(m.group(1)):
+                if isinstance(item, dict):
+                    sig = _norm(item.get("type"), item.get("to"), item.get("text"))
+                    if sig:
+                        signals.append(sig)
+        except Exception:
+            pass
+
+    # 2) Inline [SIGNAL type=... to=...] markers
+    for im in re.finditer(r'\[SIGNAL\s+type=([A-Za-z_]+)(?:\s+to=([A-Za-z0-9_\-]+))?\]\s*([^\n]+)', output):
+        sig = _norm(im.group(1), im.group(2), im.group(3))
+        if sig:
+            signals.append(sig)
+
+    # 3) Legacy free-form markers (line-anchored to avoid prose false positives)
+    if not signals:
+        fm = re.search(r'(?im)^\s*(?:FINDING|TEMUAN):\s*(.+)$', output)
+        if fm:
+            sig = _norm("FINDING", "all", fm.group(1))
+            if sig:
+                signals.append(sig)
+        qm = re.search(r'(?im)^\s*(?:QUESTION|TANYA)(?:\s+(?:KE|TO))?\s*([A-Za-z0-9_\-]+)?:\s*(.+)$', output)
+        if qm:
+            sig = _norm("QUESTION", qm.group(1), qm.group(2))
+            if sig:
+                signals.append(sig)
+        am = re.search(r'(?im)^\s*ARCHITECTURE_?CONCERN:\s*(.+)$', output)
+        if am:
+            sig = _norm("ARCHITECTURE_CONCERN", "Architect", am.group(1))
+            if sig:
+                signals.append(sig)
+
+    return signals
+
+
 async def execute_pipeline(task_id: str):
     task = tasks_store.get(task_id)
     if not task:
@@ -1049,11 +1155,28 @@ async def execute_pipeline(task_id: str):
                     inbox_lines.append(f"- Dari {pm.get('role')} [{pm.get('kind')}]: {snippet}")
                 inbox_note = "\n".join(inbox_lines) + "\n"
 
+            signal_note = ""
+            if stage["role"] != "Orchestrator" and len(task.get("stages", [])) > 1:
+                known = sorted({s.get("role", "") for s in task.get("stages", []) if s.get("role")})
+                to_hint = "SatuDari[" + ", ".join(known) + "]|all"
+                signal_note = (
+                    "\n=== KOLABORASI TIM TERSTRUKTUR (opsional) ===\n"
+                    "Untuk mengirim sinyal ke agen lain, akhiri jawabanmu dengan salah satu format:\n"
+                    "```signals\n"
+                    '[{"type": "FINDING|QUESTION|ANSWER|REQUEST_CHANGE|ARCHITECTURE_CONCERN|'
+                    'TEST_FAILED|TEST_PASSED|APPROVAL_REQUIRED|APPROVED|REJECTED|BLOCKED", '
+                    '"to": "' + to_hint + '", "text": "isi pesan"}]\n'
+                    "```\n"
+                    "atau marker inline satu baris: [SIGNAL type=QUESTION to=Role] teks pertanyaan\n"
+                    "Format bebas lama (FINDING:, QUESTION ke X:) tetap dikenali.\n"
+                )
+
             user_msg = (
                 f"{ctx.render()}\n"
                 f"{boundary_note}\n"
                 f"{jobdesk_note}\n"
                 f"{inbox_note}"
+                f"{signal_note}"
                 f"Tugas kamu sekarang sebagai [{stage['role']} - {stage['name']}]:\n"
                 f"Lakukan tugas sesuai peran dan panduan spesialisasi yang diberikan."
             )
@@ -1088,26 +1211,18 @@ async def execute_pipeline(task_id: str):
                     store.add_message(task_id, stage.get("role") or "agent", "stage_output",
                                       output, stage_idx=idx)
 
-                    # Extract structured collaborative signals: FINDING, QUESTION, ARCHITECTURE_CONCERN
-                    if re.search(r'(?:FINDING|TEMUAN):', output, re.IGNORECASE):
-                        fm = re.search(r'(?:FINDING|TEMUAN):\s*(.*?)(?=\n\s*(?:###|[A-Z_]{3,}:)|$)', output, re.IGNORECASE | re.DOTALL)
-                        ftxt = fm.group(1).strip() if fm else output[:120]
-                        store.add_message(task_id, stage["role"], "FINDING", ftxt, stage_idx=idx, to_role="all")
-                        store.add_event(task_id, "agent.finding", {"role": stage["role"], "finding": ftxt})
-
-                    if re.search(r'(?:QUESTION|TANYA)', output, re.IGNORECASE):
-                        qm = re.search(r'(?:QUESTION|TANYA)(?:\s+(?:KE|TO))?\s*([a-zA-Z0-9_\-]+)?:\s*(.*?)(?=\n\s*(?:###|[A-Z_]{3,}:)|$)', output, re.IGNORECASE | re.DOTALL)
-                        if qm:
-                            q_target = qm.group(1) or "all"
-                            q_txt = qm.group(2).strip()
-                            store.add_message(task_id, stage["role"], "QUESTION", q_txt, stage_idx=idx, to_role=q_target)
-                            store.add_event(task_id, "agent.question", {"from": stage["role"], "to": q_target, "question": q_txt})
-
-                    if "ARCHITECTURE_CONCERN:" in output or "ARCHITECTURE CONCERN:" in output:
-                        acm = re.search(r'ARCHITECTURE_?CONCERN:\s*(.*?)(?=\n\s*(?:###|[A-Z_]{3,}:)|$)', output, re.IGNORECASE | re.DOTALL)
-                        actxt = acm.group(1).strip() if acm else "Perhatian terhadap konsistensi arsitektur."
-                        store.add_message(task_id, stage["role"], "ARCHITECTURE_CONCERN", actxt, stage_idx=idx, to_role="Architect")
-                        store.add_event(task_id, "agent.message", {"type": "ARCHITECTURE_CONCERN", "from": stage["role"], "to": "Architect", "summary": actxt})
+                    # Extract structured collaborative signals (structured-first parser;
+                    # supports all SIGNAL_KINDS with validated targets, not just 3 regexes)
+                    known_roles = [s.get("role") for s in task.get("stages", []) if s.get("role")]
+                    for sig in extract_stage_signals(output, stage["role"], known_roles):
+                        store.add_message(task_id, stage["role"], sig["type"], sig["text"],
+                                          stage_idx=idx, to_role=sig["to"])
+                        if sig["type"] == "FINDING":
+                            store.add_event(task_id, "agent.finding", {"role": stage["role"], "finding": sig["text"]})
+                        elif sig["type"] == "QUESTION":
+                            store.add_event(task_id, "agent.question", {"from": stage["role"], "to": sig["to"], "question": sig["text"]})
+                        else:
+                            store.add_event(task_id, "agent.message", {"type": sig["type"], "from": stage["role"], "to": sig["to"], "summary": sig["text"]})
             except Exception as e:
                 err_type = type(e).__name__
                 raw_err = str(e).strip()
@@ -1345,36 +1460,37 @@ async def execute_pipeline(task_id: str):
             if not store.check_agent_permission("Coder", "filesystem", "write"):
                 store.add_event(task_id, "permission.denied", {"role": "Coder", "action": "filesystem.write"})
             else:
-                written_files = []
-                blocked_files = []
-                snapshot_records = []
-                for item in extracted:
-                    rel_p = item["path"]
-                    if item.get("blocked"):
-                        blocked_files.append({"path": rel_p, "reason": item.get("blocked_reason")})
-                        continue
-                    try:
-                        full_p = sanitize_path(os.path.join(wdir, rel_p.lstrip("/")), base_dir=wdir)
-                        os.makedirs(os.path.dirname(full_p), exist_ok=True)
-                        existed = os.path.exists(full_p)
-                        backup_p = f"{full_p}.bak"
-                        if existed:
-                            shutil.copy2(full_p, backup_p)
-                        with open(full_p, "w", encoding="utf-8") as fp:
-                            fp.write(item["content"])
-                        written_files.append(rel_p)
-                        snapshot_records.append({
-                            "target": full_p,
-                            "backup": backup_p,
-                            "existed": existed,
-                            "rel_path": rel_p
-                        })
-                    except Exception as e:
-                        print(f"Error applying file {item['path']}: {e}")
-                task["applied_files"] = written_files
-                task["blocked_files"] = blocked_files
-                if snapshot_records:
-                    save_apply_snapshot(wdir, task_id, snapshot_records, session_id=task.get("session_id"))
+                with workspace_file_lock(wdir):
+                    written_files = []
+                    blocked_files = []
+                    snapshot_records = []
+                    for item in extracted:
+                        rel_p = item["path"]
+                        if item.get("blocked"):
+                            blocked_files.append({"path": rel_p, "reason": item.get("blocked_reason")})
+                            continue
+                        try:
+                            full_p = sanitize_path(os.path.join(wdir, rel_p.lstrip("/")), base_dir=wdir)
+                            os.makedirs(os.path.dirname(full_p), exist_ok=True)
+                            existed = os.path.exists(full_p)
+                            backup_p = f"{full_p}.bak"
+                            if existed:
+                                shutil.copy2(full_p, backup_p)
+                            with open(full_p, "w", encoding="utf-8") as fp:
+                                fp.write(item["content"])
+                            written_files.append(rel_p)
+                            snapshot_records.append({
+                                "target": full_p,
+                                "backup": backup_p,
+                                "existed": existed,
+                                "rel_path": rel_p
+                            })
+                        except Exception as e:
+                            print(f"Error applying file {item['path']}: {e}")
+                    task["applied_files"] = written_files
+                    task["blocked_files"] = blocked_files
+                    if snapshot_records:
+                        save_apply_snapshot(wdir, task_id, snapshot_records, session_id=task.get("session_id"))
 
         # Auto-save deliverable document if enabled
         if task.get("auto_save_artifact") and wdir:
@@ -1555,6 +1671,7 @@ async def get_file_content(path: str, filename: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/workspace/save-file")
+@workspace_locked("path")
 async def save_workspace_file(req: WorkspaceSaveFileRequest):
     target_dir = sanitize_path(req.path)
     clean_file = req.rel_path.strip().strip("/")
@@ -1568,6 +1685,7 @@ async def save_workspace_file(req: WorkspaceSaveFileRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/workspace/create-item")
+@workspace_locked("path")
 async def create_workspace_item(req: WorkspaceCreateItemRequest):
     target_dir = sanitize_path(req.path)
     clean_rel = req.rel_path.strip().strip("/")
@@ -1588,6 +1706,7 @@ async def create_workspace_item(req: WorkspaceCreateItemRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/workspace/delete-item")
+@workspace_locked("path")
 async def delete_workspace_item(req: WorkspaceDeleteItemRequest):
     target_dir = sanitize_path(req.path)
     clean_rel = req.rel_path.strip().strip("/")
@@ -1608,6 +1727,7 @@ async def delete_workspace_item(req: WorkspaceDeleteItemRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/workspace/rename-item")
+@workspace_locked("path")
 async def rename_workspace_item(req: WorkspaceRenameItemRequest):
     target_dir = sanitize_path(req.path)
     old_clean = req.old_rel_path.strip().strip("/")
@@ -1628,6 +1748,7 @@ async def rename_workspace_item(req: WorkspaceRenameItemRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/workspace/save-context")
+@workspace_locked("path")
 async def save_workspace_context(req: WorkspaceSaveContextRequest):
     target_dir = sanitize_path(req.path)
     if not os.path.exists(target_dir) or not os.path.isdir(target_dir):
@@ -1641,6 +1762,7 @@ async def save_workspace_context(req: WorkspaceSaveContextRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/workspace/save-artifact")
+@workspace_locked("path")
 async def save_workspace_artifact(req: WorkspaceSaveArtifactRequest):
     target_dir = sanitize_path(req.path)
     if not os.path.exists(target_dir) or not os.path.isdir(target_dir):
@@ -1709,6 +1831,18 @@ async def get_tasks():
         reverse=True
     )
     return sorted_tasks
+
+@app.get("/api/tasks/export")
+async def export_tasks():
+    """Explicit JSON export of all tasks (SQLite is the source of truth; tasks.json is no longer auto-written)."""
+    return JSONResponse(
+        content={
+            "exported_at": time.time(),
+            "count": len(tasks_store),
+            "tasks": list(tasks_store.values()),
+        },
+        headers={"Content-Disposition": "attachment; filename=tasks_export.json"},
+    )
 
 @app.post("/api/tasks")
 async def create_task(req: TaskCreateRequest):
@@ -1932,35 +2066,36 @@ async def apply_task_files(task_id: str):
     blocked = []
     snapshot_records = []
 
-    for item in files:
-        rel_p = item["path"]
-        if item.get("blocked"):
-            blocked.append({"path": rel_p, "reason": item.get("blocked_reason", "Dilarang oleh Scope Matrix")})
-            continue
+    with workspace_file_lock(wdir):
+        for item in files:
+            rel_p = item["path"]
+            if item.get("blocked"):
+                blocked.append({"path": rel_p, "reason": item.get("blocked_reason", "Dilarang oleh Scope Matrix")})
+                continue
 
-        try:
-            full_p = sanitize_path(os.path.join(wdir, rel_p.lstrip("/")), base_dir=wdir)
-            os.makedirs(os.path.dirname(full_p), exist_ok=True)
-            existed = os.path.exists(full_p)
-            backup_p = f"{full_p}.bak"
-            if existed:
-                shutil.copy2(full_p, backup_p)
-            with open(full_p, "w", encoding="utf-8") as fp:
-                fp.write(item["content"])
-            applied.append({"path": rel_p, "lines": item["lines"]})
-            snapshot_records.append({
-                "target": full_p,
-                "backup": backup_p,
-                "existed": existed,
-                "rel_path": rel_p
-            })
-        except Exception as e:
-            print(f"Error applying file {item['path']}: {e}")
+            try:
+                full_p = sanitize_path(os.path.join(wdir, rel_p.lstrip("/")), base_dir=wdir)
+                os.makedirs(os.path.dirname(full_p), exist_ok=True)
+                existed = os.path.exists(full_p)
+                backup_p = f"{full_p}.bak"
+                if existed:
+                    shutil.copy2(full_p, backup_p)
+                with open(full_p, "w", encoding="utf-8") as fp:
+                    fp.write(item["content"])
+                applied.append({"path": rel_p, "lines": item["lines"]})
+                snapshot_records.append({
+                    "target": full_p,
+                    "backup": backup_p,
+                    "existed": existed,
+                    "rel_path": rel_p
+                })
+            except Exception as e:
+                print(f"Error applying file {item['path']}: {e}")
 
-    task["applied_files"] = [a["path"] for a in applied]
-    task["blocked_files"] = blocked
-    if snapshot_records:
-        save_apply_snapshot(wdir, task_id, snapshot_records, session_id=task.get("session_id"))
+        task["applied_files"] = [a["path"] for a in applied]
+        task["blocked_files"] = blocked
+        if snapshot_records:
+            save_apply_snapshot(wdir, task_id, snapshot_records, session_id=task.get("session_id"))
     save_tasks()
     return {
         "status": "ok",
@@ -1970,264 +2105,10 @@ async def apply_task_files(task_id: str):
         "blocked_count": len(blocked)
     }
 
-def _clean_terminal_env() -> Dict[str, str]:
-    """Sanitize environment variables for spawned terminal subprocesses.
-    
-    Removes master auth tokens, provider secrets, and credential keys so normal
-    command execution (such as `env`, `printenv`, `set`) inside the workspace cannot
-    dump server secrets directly.
-    """
-    clean = dict(os.environ)
-    sensitive_keys = {
-        "AI_TEAM_AUTH_TOKEN", "LLM_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
-        "GITHUB_TOKEN", "GH_TOKEN", "GIT_TOKEN", "AWS_SECRET_ACCESS_KEY",
-        "DATABASE_URL", "SECRET_KEY"
-    }
-    for k in list(clean.keys()):
-        if k in sensitive_keys or any(sub in k.upper() for sub in ("AUTH_TOKEN", "SECRET_KEY", "PRIVATE_KEY", "API_KEY", "PASSWORD", "CREDENTIAL")):
-            del clean[k]
-    return clean
+# --- Workspace tool routes (terminal + read-only git) moved to routes_tools.py ---
+from routes_tools import router as workspace_tools_router  # noqa: E402
 
-
-def _mask_sensitive_text(text: str) -> str:
-    """Mask known sensitive environment tokens, API keys, and patterns in terminal outputs."""
-    if not text:
-        return text
-    masked = text
-    # Mask explicitly configured keys/tokens (check module AUTH_TOKEN, current env, and .env file values)
-    configured_secrets = set()
-    global AUTH_TOKEN
-    if AUTH_TOKEN and len(AUTH_TOKEN) >= 4:
-        configured_secrets.add(AUTH_TOKEN)
-    for env_name in ("AI_TEAM_AUTH_TOKEN", "LLM_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
-        val = os.environ.get(env_name, "").strip()
-        if val and len(val) >= 4:
-            configured_secrets.add(val)
-
-    for sec in configured_secrets:
-        masked = masked.replace(sec, "[REDACTED_SECRET]")
-
-    # Mask key=value assignments: AI_TEAM_AUTH_TOKEN=..., LLM_API_KEY=..., etc. without catastrophic regex backtracking
-    if "=" in masked:
-        def _redact_env(m):
-            k = m.group(1)
-            if any(sub in k.upper() for sub in ("KEY", "TOKEN", "SECRET", "PASS", "CREDENTIAL")):
-                return f"{k}=[REDACTED_SECRET]"
-            return m.group(0)
-        masked = re.sub(r'\b([A-Za-z0-9_]{1,64})=([^\s&|;]+)', _redact_env, masked)
-
-    # Mask standard API key / token formats: sk-..., Bearer ..., gh[pousr]-...
-    masked = re.sub(r'sk-[a-zA-Z0-9_-]{20,}', '[REDACTED_API_KEY]', masked)
-    masked = re.sub(r'gh[pousr]_[a-zA-Z0-9]{36,}', '[REDACTED_GITHUB_TOKEN]', masked)
-    masked = re.sub(r'(Bearer\s+)[a-zA-Z0-9_\-\.]{16,}', r'\1[REDACTED_TOKEN]', masked, flags=re.IGNORECASE)
-    masked = re.sub(r'(https?://)[^:\s]+:[^@\s]+@', r'\1[REDACTED_CREDENTIALS]@', masked)
-    return masked
-
-
-class TerminalExecuteRequest(BaseModel):
-    command: str
-    path: Optional[str] = None
-    timeout: Optional[int] = 30
-
-
-async def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
-    """Platform-aware process tree termination.
-    
-    On Windows: uses taskkill /F /T /PID to recursively kill process tree.
-    On Unix: uses os.killpg with SIGKILL on the process group.
-    """
-    if not proc or proc.returncode is not None:
-        return
-
-    pid = proc.pid
-    if IS_WINDOWS:
-        try:
-            kill_proc = await asyncio.create_subprocess_exec(
-                "taskkill", "/F", "/T", "/PID", str(pid),
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL
-            )
-            await asyncio.wait_for(kill_proc.wait(), timeout=3.0)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-    else:
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-
-
-@app.post("/api/workspace/terminal")
-async def execute_workspace_terminal(req: TerminalExecuteRequest):
-    """Execute a shell/CLI command scoped strictly inside ALLOWED_ROOTS workspace directory."""
-    raw_cmd = (req.command or "").strip()
-    if not raw_cmd:
-        raise HTTPException(status_code=400, detail="Perintah tidak boleh kosong.")
-
-    # 1. Primary Security Control: Path & CWD Boundary check strictly within ALLOWED_ROOTS
-    cwd = sanitize_path(req.path or DEFAULT_WORKSPACE)
-    if not os.path.isdir(cwd):
-        raise HTTPException(status_code=400, detail="Direktori kerja (cwd) tidak valid.")
-
-    # 2. Timeout and output size limits
-    timeout_sec = min(max(int(req.timeout or 30), 1), 120)
-    max_output_chars = int(os.environ.get("TERMINAL_MAX_OUTPUT", 100_000))
-
-    start_t = time.time()
-    try:
-        # Execute asynchronously with process group to guarantee clean subprocess teardown
-        # and filtered environment to prevent secret leakage via `env`/`printenv`
-        subproc_kwargs = {
-            "cwd": cwd,
-            "env": _clean_terminal_env(),
-            "stdout": asyncio.subprocess.PIPE,
-            "stderr": asyncio.subprocess.PIPE,
-        }
-        if not IS_WINDOWS:
-            subproc_kwargs["start_new_session"] = True
-
-        proc = await asyncio.create_subprocess_shell(
-            raw_cmd,
-            **subproc_kwargs
-        )
-
-        try:
-            stdout_data, stderr_data = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=timeout_sec
-            )
-            exit_code = proc.returncode if proc.returncode is not None else 0
-        except asyncio.TimeoutError:
-            await _kill_process_tree(proc)
-            try:
-                # Non-blocking wait for communication completion after kill
-                stdout_data, stderr_data = await asyncio.wait_for(proc.communicate(), timeout=2.0)
-            except Exception:
-                stdout_data, stderr_data = b"", b""
-            duration_ms = int((time.time() - start_t) * 1000)
-            return {
-                "stdout": _mask_sensitive_text(stdout_data.decode("utf-8", errors="ignore")[:max_output_chars]),
-                "stderr": f"Error: Command timed out after {timeout_sec} seconds.",
-                "exit_code": -1,
-                "duration_ms": duration_ms,
-                "cwd": cwd,
-                "timed_out": True
-            }
-
-        duration_ms = int((time.time() - start_t) * 1000)
-        stdout_str = stdout_data.decode("utf-8", errors="ignore")
-        stderr_str = stderr_data.decode("utf-8", errors="ignore")
-
-        if len(stdout_str) > max_output_chars:
-            stdout_str = stdout_str[:max_output_chars] + f"\n... [Output truncated: exceeded {max_output_chars} chars]"
-        if len(stderr_str) > max_output_chars:
-            stderr_str = stderr_str[:max_output_chars] + f"\n... [Error output truncated: exceeded {max_output_chars} chars]"
-
-        return {
-            "stdout": _mask_sensitive_text(stdout_str),
-            "stderr": _mask_sensitive_text(stderr_str),
-            "exit_code": exit_code,
-            "duration_ms": duration_ms,
-            "cwd": cwd,
-            "timed_out": False
-        }
-    except Exception as e:
-        duration_ms = int((time.time() - start_t) * 1000)
-        return {
-            "stdout": "",
-            "stderr": f"Execution error: {str(e)}",
-            "exit_code": 1,
-            "duration_ms": duration_ms,
-            "cwd": cwd,
-            "timed_out": False
-        }
-
-
-@app.get("/api/workspace/git/status")
-async def api_workspace_git_status(path: Optional[str] = None):
-    """Get git status scoped strictly to the current workspace repository."""
-    target_dir = sanitize_path(path or DEFAULT_WORKSPACE)
-    if not os.path.isdir(target_dir):
-        raise HTTPException(status_code=400, detail="Direktori workspace tidak valid.")
-    git_info = get_git_info(target_dir)
-    return {
-        "path": target_dir,
-        "is_git": git_info["is_git"],
-        "branch": git_info["branch"],
-        "clean": git_info["clean"],
-        "status_lines": git_info["status_lines"]
-    }
-
-
-@app.get("/api/workspace/git/diff")
-async def api_workspace_git_diff(path: Optional[str] = None, file_path: Optional[str] = None):
-    """Get read-only git unified diff scoped strictly to the current workspace repository."""
-    target_dir = sanitize_path(path or DEFAULT_WORKSPACE)
-    if not os.path.isdir(target_dir):
-        raise HTTPException(status_code=400, detail="Direktori workspace tidak valid.")
-
-    git_dir = os.path.join(target_dir, ".git")
-    if not os.path.exists(git_dir):
-        return {
-            "path": target_dir,
-            "is_git": False,
-            "diff_lines": [],
-            "raw_diff": "",
-            "is_empty": True
-        }
-
-    cmd = ["git", "-C", target_dir, "diff", "HEAD"]
-    if file_path:
-        # Sanitize single file relative path inside target_dir
-        safe_file = sanitize_path(os.path.join(target_dir, file_path.lstrip("/")), base_dir=target_dir)
-        rel_f = os.path.relpath(safe_file, target_dir)
-        cmd.extend(["--", rel_f])
-
-    try:
-        raw_diff = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=10).decode("utf-8", errors="ignore")
-    except Exception as e:
-        raw_diff = ""
-
-    parsed_lines = []
-    additions = 0
-    deletions = 0
-    files_changed = 0
-
-    for line in raw_diff.splitlines():
-        line_clean = line.rstrip("\r\n")
-        if line_clean.startswith("diff --git"):
-            files_changed += 1
-            parsed_lines.append({"type": "file_header", "text": line_clean})
-        elif line_clean.startswith("+++") or line_clean.startswith("---"):
-            parsed_lines.append({"type": "header", "text": line_clean})
-        elif line_clean.startswith("@@"):
-            parsed_lines.append({"type": "chunk", "text": line_clean})
-        elif line_clean.startswith("+"):
-            additions += 1
-            parsed_lines.append({"type": "add", "text": line_clean[1:]})
-        elif line_clean.startswith("-"):
-            deletions += 1
-            parsed_lines.append({"type": "del", "text": line_clean[1:]})
-        else:
-            txt = line_clean[1:] if line_clean.startswith(" ") else line_clean
-            parsed_lines.append({"type": "ctx", "text": txt})
-
-    return {
-        "path": target_dir,
-        "is_git": True,
-        "is_empty": len(raw_diff.strip()) == 0,
-        "raw_diff": _mask_sensitive_text(raw_diff[:100_000]),
-        "diff_lines": parsed_lines[:2000],
-        "files_changed": files_changed,
-        "additions": additions,
-        "deletions": deletions
-    }
+app.include_router(workspace_tools_router)
 
 
 class DiffRequest(BaseModel):

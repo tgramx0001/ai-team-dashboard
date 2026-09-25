@@ -22,6 +22,11 @@
   - Configurable timeouts and output buffer truncation.
   - Automated credential and sensitive token redaction (ReDoS-safe regex engine).
   - Sanitized subprocess environments to prevent secret exposure.
+  - **stdin injection** (`stdin` field) to answer shell prompts in one-shot runs.
+  - **PTY mode** (`pty: true`, POSIX) so commands see a real TTY (`test -t 1`).
+  - **Interactive WebSocket sessions** (`/api/workspace/terminal/ws`): PTY-backed
+    streaming output; while a run is in flight, Enter in the terminal drawer is
+    forwarded as stdin. Falls back to plain HTTP when the socket is not ready.
 - **Read-Only Git Workspace Tooling**:
   - Real-time Git status (`/api/workspace/git/status`).
   - Unified diff inspection (`/api/workspace/git/diff`) directly inside the console drawer.
@@ -32,6 +37,11 @@
 - **Durable SQLite Storage**:
   - Transactional persistence for workspaces, registered agents, tasks, execution stages, and chat histories (`ai_team.db`).
   - Automated restart reconciliation for interrupted or in-flight tasks.
+  - **SQLite is the single source of truth**: the legacy `tasks.json`
+    write-through mirror was removed (a one-time import migration remains) and
+    `GET /api/tasks/export` serves explicit JSON dumps on demand.
+  - **Per-workspace write locks** serialize concurrent file mutations
+    (drawer CRUD, apply-files, pipeline auto-apply).
 - **Cross-Platform**: Fully compatible with Linux (systemd/POSIX) and Windows environments.
 
 ---
@@ -164,6 +174,15 @@ tests/
 ├── terminal/             # Command execution, timeouts, process cleanup, and Git inspection
 └── cross_platform/       # Path normalization (POSIX/Win) and process group teardown
 ```
+
+### Backend Modules
+
+| Module | Responsibility |
+|---|---|
+| `main.py` | App wiring, auth middleware, workspace/file/context/chat/pipeline routes |
+| `routes_tools.py` | Terminal routes (HTTP + PTY + WebSocket) and read-only git inspection |
+| `security_utils.py` | Path boundary (`sanitize_path`, `ALLOWED_ROOTS`), secret masking, env scrubbing, process-tree kill |
+| `store.py` | SQLite persistence (schema, tasks, sessions, messages, events) |
 
 ### Running Tests
 
