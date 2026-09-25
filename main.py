@@ -1030,13 +1030,25 @@ async def execute_pipeline(task_id: str):
                     f"   Lakukan tugasmu sesuai spesialisasi. Jangan melanggar batasan Scope Matrix di atas.\n"
                 )
 
+            # Pull inbox of structured messages directed to this role
+            pending_msgs = store.list_messages(task_id, to_role=stage["role"])
+            inbox_note = ""
+            if pending_msgs:
+                inbox_lines = [f"\n=== PESAN & PERMINTAAN DARI REKAN TIM UNTUK [{stage['role']}] ==="]
+                for pm in pending_msgs[-4:]:
+                    inbox_lines.append(f"- Dari {pm.get('role')} [{pm.get('kind')}]: {pm.get('content')}")
+                inbox_note = "\n".join(inbox_lines) + "\n"
+
             user_msg = (
                 f"{ctx.render()}\n"
                 f"{boundary_note}\n"
                 f"{jobdesk_note}\n"
+                f"{inbox_note}"
                 f"Tugas kamu sekarang sebagai [{stage['role']} - {stage['name']}]:\n"
                 f"Lakukan tugas sesuai peran dan panduan spesialisasi yang diberikan."
             )
+
+            store.add_event(task_id, "agent.started", {"role": stage["role"], "name": stage["name"], "index": idx})
 
             try:
                 temp = stage.get("temperature", 0.2)
@@ -1061,9 +1073,31 @@ async def execute_pipeline(task_id: str):
                     stage["status"] = "completed"
                     stage["completed_at"] = time.time()
                     ctx.add_stage_output(idx)
+                    store.add_event(task_id, "agent.completed", {"index": idx, "role": stage.get("role")})
                     store.add_event(task_id, "stage.completed", {"index": idx, "role": stage.get("role")})
                     store.add_message(task_id, stage.get("role") or "agent", "stage_output",
                                       output, stage_idx=idx)
+
+                    # Extract structured collaborative signals: FINDING, QUESTION, ARCHITECTURE_CONCERN
+                    if re.search(r'(?:FINDING|TEMUAN):', output, re.IGNORECASE):
+                        fm = re.search(r'(?:FINDING|TEMUAN):\s*(.+)', output, re.IGNORECASE)
+                        ftxt = fm.group(1).strip() if fm else output[:120]
+                        store.add_message(task_id, stage["role"], "FINDING", ftxt, stage_idx=idx, to_role="all")
+                        store.add_event(task_id, "agent.finding", {"role": stage["role"], "finding": ftxt})
+
+                    if re.search(r'(?:QUESTION|TANYA)\s*(?:KE|TO)?', output, re.IGNORECASE):
+                        qm = re.search(r'(?:QUESTION|TANYA)\s*(?:(?:KE|TO)\s+([a-zA-Z0-9_\-]+))?:\s*(.+)', output, re.IGNORECASE)
+                        if qm:
+                            q_target = qm.group(1) or "all"
+                            q_txt = qm.group(2).strip()
+                            store.add_message(task_id, stage["role"], "QUESTION", q_txt, stage_idx=idx, to_role=q_target)
+                            store.add_event(task_id, "agent.question", {"from": stage["role"], "to": q_target, "question": q_txt})
+
+                    if "ARCHITECTURE_CONCERN:" in output or "ARCHITECTURE CONCERN:" in output:
+                        acm = re.search(r'ARCHITECTURE_?CONCERN:\s*(.+)', output, re.IGNORECASE)
+                        actxt = acm.group(1).strip() if acm else "Perhatian terhadap konsistensi arsitektur."
+                        store.add_message(task_id, stage["role"], "ARCHITECTURE_CONCERN", actxt, stage_idx=idx, to_role="Architect")
+                        store.add_event(task_id, "agent.message", {"type": "ARCHITECTURE_CONCERN", "from": stage["role"], "to": "Architect", "summary": actxt})
             except Exception as e:
                 err_type = type(e).__name__
                 raw_err = str(e).strip()
@@ -1196,38 +1230,62 @@ async def execute_pipeline(task_id: str):
                 store.add_event(task_id, "approval.granted", {"index": idx})
                 save_single_task(task_id)
 
-            # --- AUTO-FIX / VERIFICATION LOOP ---
-            # If QA stage returns VERDICT: NEEDS_REVISION, loop back to Coder
-            if stage["role"] in ["QA", "Reviewer"] and "VERDICT: NEEDS_REVISION" in output:
-                curr_loop = task.get("current_fix_loop", 0)
-                max_loops = task.get("auto_fix_loops", 1)
-                if curr_loop < max_loops:
-                    task["current_fix_loop"] = curr_loop + 1
-                    
-                    fix_stage = {
-                        "role": "Coder",
-                        "name": f"Lead Developer (Auto-Fix Cycle #{task['current_fix_loop']})",
-                        "icon": "🔧",
-                        "temperature": 0.1,
-                        "system": "Kamu adalah Lead Full-Stack Developer. QA menemukan catatan perbaikan/bug pada kode sebelumnya. Analisis kritik QA, perbaiki implementasi secara presisi dan patuhi Scope Matrix. Setiap file wajib ditulis dengan format `### FILE: path/to/file.ext`.",
-                        "status": "waiting",
-                        "output": "",
-                        "error": None
-                    }
-                    qa_re_stage = {
-                        "role": "QA",
-                        "name": f"QA & Security Re-Verification #{task['current_fix_loop']}",
-                        "icon": "🛡️",
-                        "temperature": 0.1,
-                        "system": stage["system"],
-                        "status": "waiting",
-                        "output": "",
-                        "error": None
-                    }
-                    task["stages"].append(fix_stage)
-                    task["stages"].append(qa_re_stage)
-                    save_single_task(task_id)
-                    store.add_event(task_id, "task.auto_fix", {"cycle": task["current_fix_loop"]})
+            # --- AUTO-FIX / VERIFICATION LOOP & COLLABORATIVE GATE ---
+            if (stage["role"] in ["QA", "Reviewer"] or "QA" in stage.get("name", "")) and stage.get("status") == "completed":
+                if "VERDICT: NEEDS_REVISION" in output or "TEST_FAILED" in output or "STATUS: NEEDS_REVISION" in output:
+                    store.add_message(
+                        task_id, stage["role"], "REQUEST_CHANGE", output,
+                        stage_idx=idx, to_role="Coder", meta={"verdict": "NEEDS_REVISION"}
+                    )
+                    store.add_event(task_id, "test.failed", {"role": stage["role"], "index": idx})
+
+                    curr_loop = task.get("current_fix_loop", 0)
+                    max_loops = task.get("auto_fix_loops", 1)
+                    if curr_loop < max_loops:
+                        task["current_fix_loop"] = curr_loop + 1
+                        
+                        fix_stage = {
+                            "role": "Coder",
+                            "name": f"Lead Developer (Auto-Fix Cycle #{task['current_fix_loop']})",
+                            "icon": "🔧",
+                            "temperature": 0.1,
+                            "system": "Kamu adalah Lead Full-Stack Developer. QA menemukan catatan perbaikan/bug pada kode sebelumnya. Analisis kritik QA, perbaiki implementasi secara presisi dan patuhi Scope Matrix. Setiap file wajib ditulis dengan format `### FILE: path/to/file.ext`.",
+                            "status": "waiting",
+                            "output": "",
+                            "error": None
+                        }
+                        qa_re_stage = {
+                            "role": "QA",
+                            "name": f"QA & Security Re-Verification #{task['current_fix_loop']}",
+                            "icon": "🛡️",
+                            "temperature": 0.1,
+                            "system": stage["system"],
+                            "status": "waiting",
+                            "output": "",
+                            "error": None
+                        }
+                        task["stages"].append(fix_stage)
+                        task["stages"].append(qa_re_stage)
+                        save_single_task(task_id)
+                        store.add_event(task_id, "task.auto_fix", {"cycle": task["current_fix_loop"]})
+                    else:
+                        # Max loops reached: pause and ask human approval
+                        task["status"] = "waiting_approval"
+                        task["waiting_stage_index"] = idx
+                        task["waiting_stage_name"] = f"QA Review Gate (Maks. Perbaikan #{max_loops}x)"
+                        save_single_task(task_id)
+                        store.add_message(
+                            task_id, stage["role"], "APPROVAL_REQUIRED",
+                            "Batas siklus perbaikan otomatis tercapai namun masih ditemukan catatan QA. Memerlukan keputusan supervisor.",
+                            stage_idx=idx, to_role="user"
+                        )
+                        store.add_event(task_id, "approval.requested", {"index": idx, "reason": "auto_fix_exhausted"})
+                elif "VERDICT: PASSED" in output or "TEST_PASSED" in output:
+                    store.add_message(
+                        task_id, stage["role"], "TEST_PASSED", "Semua pengujian dan verifikasi berhasil (VERDICT: PASSED).",
+                        stage_idx=idx, to_role="all", meta={"verdict": "PASSED"}
+                    )
+                    store.add_event(task_id, "test.passed", {"role": stage["role"], "index": idx})
 
             idx += 1
 
@@ -1740,6 +1798,66 @@ async def approve_task_stage(task_id: str, req: TaskApproveRequest):
 
     return {"status": "ok", "task_status": task["status"]}
 
+
+@app.get("/api/tasks/{task_id}/messages")
+async def get_task_messages(task_id: str, kind: Optional[str] = None, to_role: Optional[str] = None):
+    task = tasks_store.get(task_id) or store.load_tasks().get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task tidak ditemukan.")
+    return {"task_id": task_id, "messages": store.list_messages(task_id, kind=kind, to_role=to_role)}
+
+
+class PostTaskMessageRequest(BaseModel):
+    role: str = "user"
+    to_role: str = "all"
+    kind: str = "QUESTION"  # QUESTION, ANSWER, FINDING, REQUEST_CHANGE, APPROVAL_REQUIRED, APPROVED, REJECTED
+    content: str
+    meta: Optional[Dict[str, Any]] = None
+
+
+@app.post("/api/tasks/{task_id}/messages")
+async def post_task_message(task_id: str, req: PostTaskMessageRequest):
+    task = tasks_store.get(task_id) or store.load_tasks().get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task tidak ditemukan.")
+    msg_id = store.add_message(task_id, req.role, req.kind, req.content, to_role=req.to_role, meta=req.meta)
+    store.add_event(task_id, f"agent.{req.kind.lower()}", {"from": req.role, "to": req.to_role, "summary": req.content[:80]})
+
+    # If task is waiting approval and user responds with approval / rejection, resume or cancel
+    if task.get("status") == "waiting_approval" and req.role == "user":
+        if req.kind in ("APPROVED", "approval.granted"):
+            await approve_task_stage(task_id, TaskApproveRequest(action="approve", feedback=req.content))
+        elif req.kind in ("REJECTED", "approval.rejected"):
+            await approve_task_stage(task_id, TaskApproveRequest(action="reject", feedback=req.content))
+
+    return {"status": "ok", "message_id": msg_id}
+
+
+@app.get("/api/agents")
+async def get_agents():
+    return {"agents": store.load_agents()}
+
+
+class AgentPermissionsRequest(BaseModel):
+    permissions: Dict[str, Any]
+
+
+@app.post("/api/agents/{role}/permissions")
+async def update_agent_permissions(role: str, req: AgentPermissionsRequest):
+    agents = store.load_agents()
+    matched = None
+    for k in agents.keys():
+        if k.lower() == role.lower():
+            matched = k
+            break
+    if not matched:
+        raise HTTPException(status_code=404, detail=f"Agent '{role}' tidak ditemukan.")
+    agent = agents[matched]
+    agent["permissions"] = req.permissions
+    store.upsert_agent(agent)
+    return {"status": "ok", "role": matched, "permissions": agent["permissions"]}
+
+
 @app.get("/api/tasks/{task_id}/extracted-files")
 async def get_task_extracted_files(task_id: str):
     task = tasks_store.get(task_id)
@@ -2220,7 +2338,7 @@ async def serve_index():
 
 
 # ============================================================================
-# PHASE 2 — Level 1 Chat (User ↔ Hermes, streaming SSE)
+# PHASE 2 & 3 — Level 1 & 2 Collaborative Chat (User ↔ Hermes ↔ Specialists)
 # ============================================================================
 
 class ChatRequest(BaseModel):
@@ -2229,6 +2347,8 @@ class ChatRequest(BaseModel):
     workspace_root: Optional[str] = None
     model: Optional[str] = None
     skills: Optional[List[str]] = None
+    agent: Optional[str] = None  # Specific agent: "Hermes", "Researcher", "Coder", "Critic", "QA", "Tutor", etc.
+    active_agents: Optional[List[str]] = None
 
 
 @app.get("/api/chat/sessions")
@@ -2241,7 +2361,8 @@ def api_chat_session_create(req: dict):
     title = (req.get("title") or "New Chat").strip()
     ws = req.get("workspace_root")
     model = req.get("model")
-    sid = store.create_chat_session(title, workspace_root=ws, model=model)
+    active_agents = req.get("active_agents") or ["Hermes"]
+    sid = store.create_chat_session(title, workspace_root=ws, model=model, active_agents=active_agents)
     return {"session": store.get_chat_session(sid)}
 
 
@@ -2258,14 +2379,98 @@ def api_chat_session_delete(session_id: str):
     return {"status": "ok"}
 
 
-def _build_chat_system_prompt(workspace_root: Optional[str], skills: Optional[List[str]]) -> str:
-    """Build a system prompt that includes workspace context + skills, like the task pipeline does."""
-    parts = [
-        "Kamu adalah Hermes, asisten AI umum yang bisa membantu coding, kuliah, riset, "
-        "analisis data, menulis, brainstorming, dan tugas apapun. "
-        "Jawab dengan bahasa yang sesuai pertanyaan user (Bahasa Indonesia atau English). "
-        "Gunakan markdown untuk format respons."
-    ]
+@app.get("/api/chat/sessions/{session_id}/agents")
+def api_chat_session_get_agents(session_id: str):
+    sess = store.get_chat_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Sesi chat tidak ditemukan.")
+    return {"session_id": session_id, "active_agents": sess.get("active_agents", ["Hermes"])}
+
+
+class ChatSessionAgentsModifyRequest(BaseModel):
+    action: str = "add"  # "add" or "remove"
+    agent: str
+
+
+@app.post("/api/chat/sessions/{session_id}/agents")
+def api_chat_session_modify_agents(session_id: str, req: ChatSessionAgentsModifyRequest):
+    sess = store.get_chat_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Sesi chat tidak ditemukan.")
+    agents = list(sess.get("active_agents") or ["Hermes"])
+    catalog = store.load_agents()
+    matched = None
+    for k in catalog.keys():
+        if k.lower() == req.agent.lower():
+            matched = k
+            break
+    if not matched:
+        raise HTTPException(status_code=400, detail=f"Agent '{req.agent}' tidak terdaftar di katalog.")
+
+    if req.action == "add":
+        if matched not in agents:
+            agents.append(matched)
+    elif req.action == "remove":
+        if matched != "Hermes" and matched in agents:
+            agents.remove(matched)
+
+    store.update_chat_session_agents(session_id, agents)
+    return {"session_id": session_id, "active_agents": agents}
+
+
+def _detect_chat_agent(message: str, requested_agent: Optional[str], catalog: Dict[str, Any]) -> str:
+    """Detect which agent should respond based on explicit request, mentions, or natural language."""
+    if requested_agent:
+        for k in catalog.keys():
+            if k.lower() == requested_agent.lower():
+                return k
+
+    # 1. Mention check: @researcher, @coder, @critic, @tutor, @qa, @architect, etc.
+    mention_m = re.search(r'@([a-zA-Z0-9_\-]+)', message)
+    if mention_m:
+        cand = mention_m.group(1).lower()
+        for k in catalog.keys():
+            if k.lower() == cand or cand in k.lower():
+                return k
+
+    # 2. Natural language invocation: "Ask Researcher...", "Tanya Coder...", "Minta Critic...", "Suruh QA..."
+    phrase_m = re.search(r'\b(?:ask|tanya|minta|suruh|hubungi)\s+([a-zA-Z0-9_\-]+)\b', message, re.IGNORECASE)
+    if phrase_m:
+        cand = phrase_m.group(1).lower()
+        for k in catalog.keys():
+            if k.lower() == cand or cand in k.lower():
+                return k
+
+    return "Hermes"
+
+
+def _build_chat_system_prompt(workspace_root: Optional[str], skills: Optional[List[str]],
+                               agent_role: str = "Hermes",
+                               active_agents: Optional[List[str]] = None) -> str:
+    """Build a system prompt supporting Hermes orchestrator and specialized collaborative agents."""
+    catalog = store.load_agents()
+    agent_spec = catalog.get(agent_role) or catalog.get("Hermes") or {}
+    agent_name = agent_spec.get("name") or agent_role
+    active_list_str = ", ".join(active_agents or ["Hermes"])
+
+    if agent_role == "Hermes":
+        parts = [
+            f"Kamu adalah Hermes ({agent_name}), asisten AI primer yang cerdas, adaptif, dan berorientasi pada tindakan nyata. "
+            "Kamu membantu pengguna untuk coding, tugas kuliah, riset, analisis data, menulis, brainstorming, dan tugas apapun. "
+            "Jawab dengan bahasa yang sesuai pertanyaan user (Bahasa Indonesia atau English). "
+            "Gunakan markdown untuk format respons.\n"
+            f"Kamu bekerja dalam workspace AI Team. Tim kolaboratif aktif saat ini: [{active_list_str}]. "
+            "Jika pengguna meminta bantuan agen spesialis (seperti @researcher, @coder, @critic, @qa, @tutor, @analyst), "
+            "kamu dapat berkolaborasi dengan mereka atau menjawab pertanyaan secara langsung."
+        ]
+    else:
+        parts = [
+            f"Kamu adalah [{agent_name}], agen spesialis ({agent_role}) dalam tim kolaboratif AI Team Workspace. "
+            f"Tim aktif saat ini: [{active_list_str}].\n"
+            f"Instruksi dan keahlian peranmu:\n{agent_spec.get('system', '')}\n"
+            "Jawab pertanyaan pengguna secara fokus dan mendalam sesuai domain spesialisasi keahlianmu. "
+            "Gunakan markdown untuk format respons."
+        ]
 
     if workspace_root:
         try:
@@ -2373,12 +2578,23 @@ async def api_chat(req: ChatRequest):
     sess = store.get_chat_session(session_id) or {}
     model_override = req.model or sess.get("model") or None
 
-    # Persist user message
-    store.add_chat_message(session_id, "user", req.message.strip())
+    catalog = store.load_agents()
+    target_agent = _detect_chat_agent(req.message, req.agent, catalog)
 
-    # Build system prompt with workspace + skills context
+    # Track active agents in session
+    current_active_agents = list(sess.get("active_agents") or ["Hermes"])
+    if target_agent not in current_active_agents:
+        current_active_agents.append(target_agent)
+        store.update_chat_session_agents(session_id, current_active_agents)
+
+    # Persist user message
+    store.add_chat_message(session_id, "user", req.message.strip(), agent="user")
+
+    # Build system prompt with workspace + skills context + agent role
     ws_root = req.workspace_root or sess.get("workspace_root")
-    system_prompt = _build_chat_system_prompt(ws_root, req.skills)
+    system_prompt = _build_chat_system_prompt(
+        ws_root, req.skills, agent_role=target_agent, active_agents=current_active_agents
+    )
 
     # Build messages array: system + recent history + new user message
     history = store.get_recent_chat_context(session_id, n_turns=20)
@@ -2387,9 +2603,12 @@ async def api_chat(req: ChatRequest):
     async def event_generator():
         collected: List[str] = []
         used_model = model_override
+        agent_spec = catalog.get(target_agent) or {}
+
+        # Emit agent.started event so client knows which specialist is working
+        yield f"data: {json.dumps({'type': 'agent.started', 'agent': target_agent, 'icon': agent_spec.get('icon', '🤖')})}\n\n"
 
         async for sse_line in _stream_chat_llm(llm_messages, model=model_override):
-            yield sse_line
             # Parse final 'done' or 'error' event to persist assistant message
             try:
                 raw_data = sse_line[6:].strip() if sse_line.startswith("data: ") else sse_line.strip()
@@ -2398,12 +2617,17 @@ async def api_chat(req: ChatRequest):
                     collected_text = payload.get("full_content", "")
                     used_model = payload.get("model")
                     if collected_text:
-                        store.add_chat_message(session_id, "assistant", collected_text, model=used_model)
+                        store.add_chat_message(session_id, "assistant", collected_text, model=used_model, agent=target_agent)
+                    payload["agent"] = target_agent
+                    payload["active_agents"] = current_active_agents
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    continue
                 elif payload.get("error"):
                     err_msg = f"[Error: {payload.get('error')}]"
-                    store.add_chat_message(session_id, "assistant", err_msg, model=used_model)
+                    store.add_chat_message(session_id, "assistant", err_msg, model=used_model, agent=target_agent)
             except Exception:
                 pass
+            yield sse_line
 
     return StreamingResponse(
         event_generator(),

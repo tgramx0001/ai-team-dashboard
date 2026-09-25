@@ -16,7 +16,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _db_initialized = False
 
@@ -144,8 +144,10 @@ CREATE TABLE IF NOT EXISTS messages (
     task_id    TEXT REFERENCES tasks(id) ON DELETE CASCADE,
     stage_idx  INTEGER,
     role       TEXT,
+    to_role    TEXT DEFAULT 'all',
     kind       TEXT,
     content    TEXT,
+    meta       TEXT DEFAULT '{}',
     created_at REAL
 );
 
@@ -167,6 +169,7 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
     title             TEXT NOT NULL,
     workspace_root    TEXT,
     model             TEXT,
+    active_agents     TEXT DEFAULT '["Hermes"]',
     created_at        REAL,
     updated_at        REAL
 );
@@ -175,6 +178,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
     role       TEXT NOT NULL,
+    agent      TEXT DEFAULT 'Hermes',
     content    TEXT NOT NULL,
     model      TEXT,
     created_at REAL
@@ -215,9 +219,27 @@ def init_db() -> int:
 
 
 def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int) -> None:
-    """Versioned upgrades. v0 -> v1 is CREATE TABLE IF NOT EXISTS (idempotent).
-    v1 -> v2 adds chat_sessions + chat_messages (also CREATE IF NOT EXISTS, safe)."""
-    _ = (from_version, to_version)
+    """Versioned upgrades.
+    v0 -> v1 is CREATE TABLE IF NOT EXISTS (idempotent).
+    v1 -> v2 adds chat_sessions + chat_messages (also CREATE IF NOT EXISTS, safe).
+    v2 -> v3 adds structured messages columns (to_role, meta) and collaborative chat agents."""
+    if from_version < 3:
+        # Check messages table columns
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(messages)").fetchall()]
+        if "to_role" not in cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN to_role TEXT DEFAULT 'all'")
+        if "meta" not in cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN meta TEXT DEFAULT '{}'")
+
+        # Check chat_sessions table columns
+        s_cols = [r[1] for r in conn.execute("PRAGMA table_info(chat_sessions)").fetchall()]
+        if "active_agents" not in s_cols:
+            conn.execute("ALTER TABLE chat_sessions ADD COLUMN active_agents TEXT DEFAULT '[\"Hermes\"]'")
+
+        # Check chat_messages table columns
+        m_cols = [r[1] for r in conn.execute("PRAGMA table_info(chat_messages)").fetchall()]
+        if "agent" not in m_cols:
+            conn.execute("ALTER TABLE chat_messages ADD COLUMN agent TEXT DEFAULT 'Hermes'")
 
 
 def schema_info() -> Dict[str, Any]:
@@ -433,15 +455,17 @@ def import_tasks_from_json(path: Optional[str] = None) -> Dict[str, Dict[str, An
 # ---------------------------------------------------------------- messages + events
 
 def add_message(task_id: str, role: str, kind: str, content: str,
-                stage_idx: Optional[int] = None) -> int:
+                stage_idx: Optional[int] = None, to_role: str = "all",
+                meta: Optional[Dict[str, Any]] = None) -> int:
     init_db()
     conn = connect()
     try:
         with conn:
+            meta_json = json.dumps(meta or {}, ensure_ascii=False) if isinstance(meta, dict) else (meta or "{}")
             cur = conn.execute(
-                "INSERT INTO messages (task_id, stage_idx, role, kind, content, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (task_id, stage_idx, role, kind, content, time.time()),
+                "INSERT INTO messages (task_id, stage_idx, role, to_role, kind, content, meta, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (task_id, stage_idx, role, to_role, kind, content, meta_json, time.time()),
             )
         return int(cur.lastrowid or 0)
     finally:
@@ -462,11 +486,26 @@ def add_event(task_id: Optional[str], type_: str, payload: Optional[Dict[str, An
         conn.close()
 
 
-def list_messages(task_id: str) -> List[Dict[str, Any]]:
+def list_messages(task_id: str, kind: Optional[str] = None, to_role: Optional[str] = None) -> List[Dict[str, Any]]:
     conn = connect()
     try:
-        return [dict(r) for r in conn.execute(
-            "SELECT * FROM messages WHERE task_id=? ORDER BY id", (task_id,))]
+        sql = "SELECT * FROM messages WHERE task_id=?"
+        params: List[Any] = [task_id]
+        if kind:
+            sql += " AND kind=?"
+            params.append(kind)
+        if to_role:
+            sql += " AND (to_role=? OR to_role='all')"
+            params.append(to_role)
+        sql += " ORDER BY id ASC"
+        rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+        for r in rows:
+            if "meta" in r and isinstance(r["meta"], str):
+                try:
+                    r["meta"] = json.loads(r["meta"])
+                except Exception:
+                    pass
+        return rows
     finally:
         conn.close()
 
@@ -697,6 +736,20 @@ def seed_agents_from_file(path: Optional[str] = None) -> int:
                 role = (agent.get("role") or key).strip()
                 cur = conn.execute("SELECT 1 FROM agents WHERE role=?", (role,))
                 if cur.fetchone():
+                    # Update definition and permissions from file for builtin agents
+                    conn.execute(
+                        "UPDATE agents SET name=?, icon=?, system=?, temperature=?, tools=?, permissions=?, updated_at=? WHERE role=? AND builtin=1",
+                        (
+                            agent.get("name") or role,
+                            agent.get("icon") or "🤖",
+                            agent.get("system") or "",
+                            float(agent.get("temperature") or 0.2),
+                            json.dumps(agent.get("tools") or [], ensure_ascii=False),
+                            json.dumps(agent.get("permissions") or {}, ensure_ascii=False),
+                            time.time(),
+                            role,
+                        ),
+                    )
                     continue
                 now = time.time()
                 conn.execute(
@@ -748,7 +801,18 @@ def list_chat_sessions() -> List[Dict[str, Any]]:
     conn = connect()
     try:
         rows = conn.execute("SELECT * FROM chat_sessions ORDER BY updated_at DESC").fetchall()
-        return [dict(r) for r in rows]
+        result = []
+        for r in rows:
+            d = dict(r)
+            if "active_agents" in d and isinstance(d["active_agents"], str):
+                try:
+                    d["active_agents"] = json.loads(d["active_agents"])
+                except Exception:
+                    d["active_agents"] = ["Hermes"]
+            else:
+                d["active_agents"] = ["Hermes"]
+            result.append(d)
+        return result
     finally:
         conn.close()
 
@@ -757,27 +821,52 @@ def get_chat_session(session_id: str) -> Optional[Dict[str, Any]]:
     conn = connect()
     try:
         row = conn.execute("SELECT * FROM chat_sessions WHERE id=?", (session_id,)).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        d = dict(row)
+        if "active_agents" in d and isinstance(d["active_agents"], str):
+            try:
+                d["active_agents"] = json.loads(d["active_agents"])
+            except Exception:
+                d["active_agents"] = ["Hermes"]
+        else:
+            d["active_agents"] = ["Hermes"]
+        return d
     finally:
         conn.close()
 
 
 def create_chat_session(title: str, workspace_root: Optional[str] = None,
-                        model: Optional[str] = None) -> str:
+                        model: Optional[str] = None,
+                        active_agents: Optional[List[str]] = None) -> str:
     init_db()
     sess_id = str(uuid.uuid4())[:12]
     now = time.time()
+    agents_json = json.dumps(active_agents or ["Hermes"], ensure_ascii=False)
     conn = connect()
     try:
         with conn:
             conn.execute(
-                "INSERT INTO chat_sessions (id, title, workspace_root, model, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (sess_id, title, workspace_root, model, now, now),
+                "INSERT INTO chat_sessions (id, title, workspace_root, model, active_agents, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (sess_id, title, workspace_root, model, agents_json, now, now),
             )
     finally:
         conn.close()
     return sess_id
+
+
+def update_chat_session_agents(session_id: str, active_agents: List[str]) -> None:
+    init_db()
+    conn = connect()
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE chat_sessions SET active_agents=?, updated_at=? WHERE id=?",
+                (json.dumps(active_agents, ensure_ascii=False), time.time(), session_id),
+            )
+    finally:
+        conn.close()
 
 
 def update_chat_session_ts(session_id: str) -> None:
@@ -800,15 +889,15 @@ def delete_chat_session(session_id: str) -> bool:
 
 
 def add_chat_message(session_id: str, role: str, content: str,
-                     model: Optional[str] = None) -> int:
+                     model: Optional[str] = None, agent: str = "Hermes") -> int:
     now = time.time()
     conn = connect()
     try:
         with conn:
             cur = conn.execute(
-                "INSERT INTO chat_messages (session_id, role, content, model, created_at)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (session_id, role, content, model, now),
+                "INSERT INTO chat_messages (session_id, role, agent, content, model, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (session_id, role, agent, content, model, now),
             )
         update_chat_session_ts(session_id)
         return int(cur.lastrowid or 0)
@@ -826,6 +915,29 @@ def list_chat_messages(session_id: str, limit: int = 100) -> List[Dict[str, Any]
         return [dict(r) for r in rows]
     finally:
         conn.close()
+
+
+def check_agent_permission(role: str, capability: str, subaction: Optional[str] = None) -> bool:
+    """Check if an agent has permission for a specific capability/tool.
+    capability: 'filesystem', 'shell', 'git', 'web'
+    subaction: for filesystem: 'read', 'write'
+    """
+    agents = load_agents()
+    agent = agents.get(role)
+    if not agent:
+        # Fallback for Hermes / unspecified: unrestricted
+        return True
+    perms = agent.get("permissions") or {}
+    if not perms:
+        return True
+    val = perms.get(capability)
+    if val is None:
+        return False
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, dict) and subaction:
+        return bool(val.get(subaction, False))
+    return bool(val)
 
 
 def get_recent_chat_context(session_id: str, n_turns: int = 20) -> List[Dict[str, str]]:

@@ -13,7 +13,7 @@ import main
 from main import app, _build_chat_system_prompt
 import store
 
-client = TestClient(app)
+client = TestClient(app, headers={"Authorization": f"Bearer {main.AUTH_TOKEN}"} if main.AUTH_TOKEN else {})
 
 class TestPhase2Verification(unittest.TestCase):
 

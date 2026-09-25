@@ -5,7 +5,7 @@ import main
 from main import app, sanitize_path, extract_code_files
 from fastapi import HTTPException
 
-client = TestClient(app)
+client = TestClient(app, headers={"Authorization": f"Bearer {main.AUTH_TOKEN}"} if main.AUTH_TOKEN else {})
 
 class TestSecurityAndFeatures(unittest.TestCase):
 

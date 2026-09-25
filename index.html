@@ -926,6 +926,26 @@
       <span id="chatModelLabel" class="text-[10px] font-mono text-brand-light ml-2 shrink-0">—</span>
     </div>
 
+    <!-- active team & specialist selector (Phase 3) -->
+    <div id="chatTeamBar" class="px-3 py-1.5 border-b border-subtle/50 flex items-center justify-between shrink-0 bg-white/[0.01] gap-2">
+      <div class="flex items-center gap-1.5 shrink-0 overflow-x-auto max-w-[65%]" id="chatActiveTeamBadges">
+        <span class="text-[10px] text-[#8a8f98]">Tim:</span>
+        <span class="px-1.5 py-0.5 rounded text-[10px] bg-brand/20 text-brand-light font-medium border border-brand/30">⚡ Hermes</span>
+      </div>
+      <div class="flex items-center gap-1 shrink-0">
+        <select id="chatTargetAgent" class="text-[10px] bg-black/40 border border-subtle text-[#d0d6e0] rounded px-1.5 py-0.5 outline-none">
+          <option value="Hermes">⚡ Hermes (Primary)</option>
+          <option value="Researcher">🔍 Researcher</option>
+          <option value="Coder">⚡ Coder</option>
+          <option value="Critic">🧐 Critic</option>
+          <option value="QA">🛡️ QA</option>
+          <option value="Tutor">🎓 Tutor</option>
+          <option value="Data Analyst">📊 Data Analyst</option>
+          <option value="Architect">📐 Architect</option>
+        </select>
+      </div>
+    </div>
+
     <!-- messages -->
     <div id="chatMessages" class="flex-1 overflow-y-auto p-3 space-y-3 font-sans"></div>
 
@@ -3492,11 +3512,30 @@
       document.getElementById('chatDrawer').style.transform = 'translateX(100%)';
     }
 
+    const AGENT_ICONS = {
+      'Hermes': '⚡', 'Researcher': '🔍', 'Coder': '⚡', 'Critic': '🧐',
+      'QA': '🛡️', 'Tutor': '🎓', 'Data Analyst': '📊', 'Architect': '📐',
+      'UI/UX': '🎨', 'Security': '🔍', 'Writer': '✍️', 'Planner': '📋', 'Reviewer': '🎯'
+    };
+
+    function renderActiveTeamBadges(agents) {
+      const container = document.getElementById('chatActiveTeamBadges');
+      if (!container) return;
+      const list = agents && agents.length ? agents : ['Hermes'];
+      container.innerHTML = '<span class="text-[10px] text-[#8a8f98]">Tim:</span>' + list.map(a => `
+        <span class="px-1.5 py-0.5 rounded text-[10px] bg-brand/20 text-brand-light font-medium border border-brand/30 flex items-center gap-1 shrink-0">
+          <span>${AGENT_ICONS[a] || '🤖'}</span>
+          <span>${escapeHtml(a)}</span>
+        </span>
+      `).join('');
+    }
+
     async function chatNewSession() {
+      const targetAgent = document.getElementById('chatTargetAgent')?.value || 'Hermes';
       const res = await fetch('/api/chat/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: 'New Chat' })
+        body: JSON.stringify({ title: 'New Chat', active_agents: [targetAgent] })
       });
       if (!res.ok) { showToast('Gagal membuat sesi', '✕'); return; }
       const data = await res.json();
@@ -3504,21 +3543,28 @@
       document.getElementById('chatSessionLabel').textContent = data.session.title + ' · ' + chatSessionId;
       document.getElementById('chatModelLabel').textContent = activeModelName || '—';
       document.getElementById('chatMessages').innerHTML = '';
+      renderActiveTeamBadges(data.session.active_agents || ['Hermes']);
     }
 
     async function loadChatMessages(sessId) {
+      const sessRes = await fetch(`/api/chat/sessions/${sessId}/agents`);
+      if (sessRes.ok) {
+        const sessData = await sessRes.json();
+        renderActiveTeamBadges(sessData.active_agents || ['Hermes']);
+      }
+
       const res = await fetch(`/api/chat/sessions/${sessId}/messages`);
       if (!res.ok) return;
       const data = await res.json();
       const container = document.getElementById('chatMessages');
       container.innerHTML = '';
       for (const m of (data.messages || [])) {
-        appendChatBubble(m.role, m.content, false);
+        appendChatBubble(m.role, m.content, false, m.agent);
       }
       container.scrollTop = container.scrollHeight;
     }
 
-    function appendChatBubble(role, content, streaming) {
+    function appendChatBubble(role, content, streaming, agent) {
       const container = document.getElementById('chatMessages');
       const isUser = role === 'user';
       const id = streaming ? 'chatStreamBubble' : undefined;
@@ -3529,10 +3575,14 @@
       bubble.className = isUser
         ? 'max-w-[80%] rounded-xl bg-brand/20 border border-brand/30 text-[#e8ebf0] text-xs px-3 py-2 whitespace-pre-wrap leading-relaxed'
         : 'max-w-[90%] rounded-xl bg-white/[0.04] border border-subtle text-[#e8ebf0] text-xs px-3 py-2 leading-relaxed prose-dark';
+      
       if (isUser) {
         bubble.textContent = content;
       } else {
-        bubble.innerHTML = mdRender(content);
+        const agentName = agent || 'Hermes';
+        const icon = AGENT_ICONS[agentName] || '🤖';
+        const header = `<div class="text-[10px] text-brand-light mb-1 flex items-center gap-1 font-mono font-semibold select-none"><span>${icon}</span><span>${escapeHtml(agentName)}</span></div>`;
+        bubble.innerHTML = header + mdRender(content);
       }
       div.appendChild(bubble);
       container.appendChild(div);
@@ -3570,17 +3620,22 @@
       container.scrollTop = container.scrollHeight;
 
       const useWs = document.getElementById('chatUseWorkspace')?.checked;
+      const targetAgent = document.getElementById('chatTargetAgent')?.value || 'Hermes';
       const body = {
         message: msg,
         session_id: chatSessionId,
         workspace_root: useWs ? currentWorkspace : null,
         model: activeModelName || null,
+        agent: targetAgent,
       };
 
       try {
         const token = localStorage.getItem('ai_team_auth_token');
         const headers = { 'Content-Type': 'application/json' };
         if (token) headers['Authorization'] = 'Bearer ' + token;
+
+        let currentAgent = targetAgent;
+        let currentIcon = AGENT_ICONS[targetAgent] || '🤖';
 
         // POST + ReadableStream SSE (native EventSource is GET-only, cannot do POST)
         const res = await _nativeFetch('/api/chat', { method: 'POST', headers, body: JSON.stringify(body) });
@@ -3606,13 +3661,19 @@
               if (!dataStr) continue;
               try {
                 const evt = JSON.parse(dataStr);
-                if (evt.chunk) {
+                if (evt.type === 'agent.started') {
+                  currentAgent = evt.agent;
+                  currentIcon = evt.icon || AGENT_ICONS[evt.agent] || '🤖';
+                  document.getElementById('chatStreamStatus').textContent = currentIcon + ' ' + currentAgent + ' sedang berpikir…';
+                } else if (evt.chunk) {
                   accumulated += evt.chunk;
-                  streamBubble.innerHTML = mdRender(accumulated);
+                  const header = `<div class="text-[10px] text-brand-light mb-1 flex items-center gap-1 font-mono font-semibold select-none"><span>${currentIcon}</span><span>${escapeHtml(currentAgent)}</span></div>`;
+                  streamBubble.innerHTML = header + mdRender(accumulated);
                   container.scrollTop = container.scrollHeight;
                 } else if (evt.done) {
-                  // final event — model label update
+                  // final event — model & active agents update
                   document.getElementById('chatModelLabel').textContent = evt.model || activeModelName || '—';
+                  if (evt.active_agents) renderActiveTeamBadges(evt.active_agents);
                 } else if (evt.error) {
                   streamBubble.textContent = '✕ ' + evt.error;
                 }
